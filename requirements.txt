@@ -1,0 +1,15 @@
+streamlit==1.58.0
+pandas==3.0.3
+plotly==6.7.0
+google-genai==2.7.0
+google-auth==2.53.0
+streamlit-mic-recorder==0.0.8
+requests==2.34.2
+numpy==2.4.3
+matplotlib==3.10.9
+python-dotenv==1.1.0
+fastapi==0.136.3
+line-bot-sdk==3.23.0
+uvicorn==0.48.0
+litellm==1.88.1
+cachetools==5.5.0
