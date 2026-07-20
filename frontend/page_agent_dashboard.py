@@ -67,9 +67,14 @@ def format_parameters_to_chinese(tool_name: str, args) -> str:
         supplier_id = args.get("supplier_id", "")
         product_id = args.get("product_id", "")
         qty = args.get("qty", "")
+        unit_price = args.get("unit_price")
+        try:
+            price_text = f"｜單價 NT${float(unit_price):,.2f}"
+        except (TypeError, ValueError):
+            price_text = f"｜單價 {unit_price}" if unit_price not in (None, "") else ""
         return (
             f"採購單 {po_id}｜供應商 {supplier_id}｜"
-            f"商品 {product_id} × {qty}"
+            f"商品 {product_id} × {qty}{price_text}"
         )
         
     # 其他工具的參數 key 對照表
