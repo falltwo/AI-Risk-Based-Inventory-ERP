@@ -10,6 +10,12 @@ import pandas as pd
 from datetime import datetime, timedelta
 from typing import List, Optional, Any
 from backend.database import DB_FILE, run_query
+from backend.access_control import (
+    ERP_POLICY_WRITE,
+    RISK_WHAT_IF_RUN,
+    RISK_WORKSPACE_WRITE,
+    require_capability,
+)
 from backend.prompts import (
     HEATMAP_AI_SUMMARY_PROMPT_V2,
     BATCH_INFER_WITH_PRECEDENTS_PROMPT,
@@ -312,8 +318,11 @@ def get_risk_heatmap_data():
     return out
 
 
-def upsert_risk_heatmap(region_key, display_name, latitude, longitude, risk_pct, ai_summary=None):
+def upsert_risk_heatmap(
+    region_key, display_name, latitude, longitude, risk_pct, ai_summary=None, *, actor=None
+):
     """新增或更新一筆熱圖熱點。"""
+    require_capability(actor, RISK_WORKSPACE_WRITE)
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     conn = sqlite3.connect(DB_FILE)
     conn.execute(
@@ -327,8 +336,9 @@ def upsert_risk_heatmap(region_key, display_name, latitude, longitude, risk_pct,
     conn.close()
 
 
-def reset_risk_heatmap_to_initial():
+def reset_risk_heatmap_to_initial(*, actor=None):
     """清空 risk_heatmap 表，使熱圖還原為依供應商據點與風險事件計算的初始狀態。"""
+    require_capability(actor, RISK_WORKSPACE_WRITE)
     conn = sqlite3.connect(DB_FILE)
     conn.execute("DELETE FROM risk_heatmap")
     conn.commit()
@@ -461,12 +471,13 @@ def get_heatmap_ai_summary(api_key: str = "", news_context: str = "", reference_
         return f"AI 摘要解析失敗：{e}", [], []
 
 
-def apply_heatmap_updates(updates, ai_summary=None):
+def apply_heatmap_updates(updates, ai_summary=None, *, actor=None):
     """
     將 AI 回傳的 UPDATE 清單套用到熱圖。
     - 若 update 的 display_name 為廣域地區（如「亞洲」），則將該地區內所有熱點都更新為對應 risk_pct。
     - 否則依「display_name 包含於熱點 display_name」匹配單一熱點後更新。
     """
+    require_capability(actor, RISK_WORKSPACE_WRITE)
     if not updates:
         return 0
     heatmap_rows = get_risk_heatmap_data()
@@ -500,7 +511,7 @@ def apply_heatmap_updates(updates, ai_summary=None):
                     if country in countries:
                         upsert_risk_heatmap(
                             r["region_key"], r["display_name"], r["latitude"], r["longitude"],
-                            float(risk_pct), summary_snippet,
+                            float(risk_pct), summary_snippet, actor=actor,
                         )
                         matched_count += 1
                 is_region_match = True
@@ -525,7 +536,7 @@ def apply_heatmap_updates(updates, ai_summary=None):
             if matched:
                 upsert_risk_heatmap(
                     r["region_key"], r["display_name"], r["latitude"], r["longitude"],
-                    float(risk_pct), summary_snippet,
+                    float(risk_pct), summary_snippet, actor=actor,
                 )
                 matched_count += 1
     return matched_count
@@ -730,8 +741,11 @@ def get_impacted_pos(region_key=None, country=None, supplier_id=None):
     return out
 
 
-def update_po_impact(po_id, estimated_delay_days=None, alternative_suggestion=None):
+def update_po_impact(
+    po_id, estimated_delay_days=None, alternative_suggestion=None, *, actor=None
+):
     """更新採購單的預計延遲天數與替代建議。"""
+    require_capability(actor, ERP_POLICY_WRITE)
     conn = sqlite3.connect(DB_FILE)
     if estimated_delay_days is not None:
         conn.execute("UPDATE purchase_orders SET estimated_delay_days = ? WHERE po_id = ?", (estimated_delay_days, po_id))
@@ -815,8 +829,15 @@ def get_ai_alternative_suggestions(api_key="", impacted_list=None, hotspot_name=
 
 # ── 模擬情境分析 (What-If Simulation) ──────────────────────────────────
 
-def what_if_simulation(api_key, user_question, model: str | None = "gemini-2.5-flash"):
+def what_if_simulation(
+    api_key,
+    user_question,
+    model: str | None = "gemini-2.5-flash",
+    *,
+    actor=None,
+):
     """依使用者情境問題，結合 ERP 供應商、未結案採購單、庫存安全天數，由 AI 回覆影響與建議。model 為 Gemini 模型 ID。"""
+    require_capability(actor, RISK_WHAT_IF_RUN)
     conn = sqlite3.connect(DB_FILE)
     suppliers = __pd_read("SELECT supplier_id, name, country, region FROM suppliers", conn)
     pos = __pd_read(
@@ -915,8 +936,11 @@ def get_historical_event_precedents():
         conn.close()
 
 
-def add_risk_event(event_type, region, country, impact_days, description, news_id=None):
+def add_risk_event(
+    event_type, region, country, impact_days, description, news_id=None, *, actor=None
+):
     """新增或更新風險事件（如果該區域已存在事件則覆蓋）。"""
+    require_capability(actor, RISK_WORKSPACE_WRITE)
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
@@ -950,8 +974,9 @@ def add_risk_event(event_type, region, country, impact_days, description, news_i
         return new_id
 
 
-def delete_risk_event(event_id):
+def delete_risk_event(event_id, *, actor=None):
     """刪除一筆風險事件。"""
+    require_capability(actor, RISK_WORKSPACE_WRITE)
     run_query("DELETE FROM supply_chain_events WHERE id = ?", (event_id,), fetch=False)
 
 
@@ -1129,12 +1154,20 @@ def get_stockout_alerts_for_event(region: str, country: str, impact_days: int):
     alerts.sort(key=lambda x: risk_weight(x['risk_level']))
     return alerts
 
-def increase_safety_stock_for_event(region: str, country: str, impact_days: int, multiplier: float = 1.0):
+def increase_safety_stock_for_event(
+    region: str,
+    country: str,
+    impact_days: int,
+    multiplier: float = 1.0,
+    *,
+    actor=None,
+):
     """
     針對受風險事件影響的地區，找出該區供應商提供的所有物料，
     動態計算應調高的安全水位。公式：新水位 = 基準水位 + (日銷量 * 影響天數 * 倍率)。
     基準水位會被保存在 baseline_reorder_point 中以供日後還原。
     """
+    require_capability(actor, ERP_POLICY_WRITE)
     conn = sqlite3.connect(DB_FILE)
     where, params = _get_expanded_region_where(region, country, prefix="s.")
     if not where:
@@ -1184,16 +1217,18 @@ def increase_safety_stock_for_event(region: str, country: str, impact_days: int,
     conn.close()
     return updated_count
 
-def restore_all_rop_to_baseline():
+def restore_all_rop_to_baseline(*, actor=None):
     """將所有產品的安全水位還原至基準值 (baseline_reorder_point)。"""
+    require_capability(actor, ERP_POLICY_WRITE)
     conn = sqlite3.connect(DB_FILE)
     # 僅針對有設定 baseline 的進行還原
     conn.execute("UPDATE inventory SET reorder_point = baseline_reorder_point WHERE baseline_reorder_point IS NOT NULL")
     conn.commit()
     conn.close()
     return True
-def update_reorder_point(product_id: str, new_reorder_point: int):
+def update_reorder_point(product_id: str, new_reorder_point: int, *, actor=None):
     """手動更新指定物料的安全庫存水位。"""
+    require_capability(actor, ERP_POLICY_WRITE)
     conn = sqlite3.connect(DB_FILE)
     conn.execute(
         "UPDATE inventory SET reorder_point = ? WHERE product_id = ?",
@@ -1244,8 +1279,11 @@ def get_risk_factors_raw():
     return df
 
 
-def save_risk_factor(risk_type, risk_key, risk_score, weight, note=None):
+def save_risk_factor(
+    risk_type, risk_key, risk_score, weight, note=None, *, actor=None
+):
     """新增或更新一筆風險係數。"""
+    require_capability(actor, RISK_WORKSPACE_WRITE)
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     run_query(
         "INSERT OR REPLACE INTO esg_risk_factors (risk_type, risk_key, risk_score, weight, note, updated_at) VALUES (?,?,?,?,?,?)",
@@ -1254,13 +1292,15 @@ def save_risk_factor(risk_type, risk_key, risk_score, weight, note=None):
     )
 
 
-def delete_risk_factor(factor_id):
+def delete_risk_factor(factor_id, *, actor=None):
     """刪除一筆風險係數。"""
+    require_capability(actor, RISK_WORKSPACE_WRITE)
     run_query("DELETE FROM esg_risk_factors WHERE id = ?", (factor_id,), fetch=False)
 
 
-def clear_all_risk_factors():
+def clear_all_risk_factors(*, actor=None):
     """清空全部風險係數（供重新實作或重置使用）。"""
+    require_capability(actor, RISK_WORKSPACE_WRITE)
     conn = sqlite3.connect(DB_FILE)
     conn.execute("DELETE FROM esg_risk_factors")
     conn.commit()
@@ -1334,8 +1374,9 @@ def get_risk_ai_suggestions(api_key: str = "", news_context: str = "", region_su
     return text
 
 
-def load_preset_risk_factors():
+def load_preset_risk_factors(*, actor=None):
     """載入預設風險係數範本（地區、事件類型、供應商類別）。"""
+    require_capability(actor, RISK_WORKSPACE_WRITE)
     conn = sqlite3.connect(DB_FILE)
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     presets = [

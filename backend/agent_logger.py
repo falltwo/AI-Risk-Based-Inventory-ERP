@@ -54,9 +54,10 @@ def create_pending_approval(
     args: dict,
     role: str,
     *,
+    requester_username: str | None = None,
     operation_id: str | None = None,
     resource_version: str = "unspecified",
-    policy_version: str = "po-approval-v1",
+    policy_version: str = "po-approval-v2",
 ) -> str:
     """
     建立待審批項目至 pending_approvals 表中，含雜湊鏈 checksum，回傳 approval_id。
@@ -81,6 +82,7 @@ def create_pending_approval(
             args=args or {},
             resource_version=resource_version,
             policy_version=policy_version,
+            requester_username=requester_username,
         )
 
     with transaction(immediate=operation_id is not None) as conn:
@@ -109,11 +111,12 @@ def create_pending_approval(
 
         query = """
             INSERT INTO pending_approvals (
-                approval_id, tool_name, parameters, requester, status, approver,
+                approval_id, tool_name, parameters, requester,
+                requester_username, status, approver,
                 created_at, updated_at, reason, checksum, operation_id,
                 payload_digest, resource_version, policy_version, version
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         tx_run(
             conn,
@@ -123,6 +126,7 @@ def create_pending_approval(
                 tool_name,
                 parameters_str,
                 role,
+                requester_username,
                 "pending",
                 None,
                 created_at,
@@ -179,7 +183,8 @@ def get_pending_approvals(status_filter: str = None) -> list[dict]:
         query = """
             SELECT approval_id, tool_name, parameters, requester, status, approver,
                    created_at, updated_at, reason, checksum, operation_id,
-                   payload_digest, resource_version, policy_version, version
+                   payload_digest, resource_version, policy_version, version,
+                   requester_username
             FROM pending_approvals
             WHERE status = ?
             ORDER BY created_at DESC
@@ -189,7 +194,8 @@ def get_pending_approvals(status_filter: str = None) -> list[dict]:
         query = """
             SELECT approval_id, tool_name, parameters, requester, status, approver,
                    created_at, updated_at, reason, checksum, operation_id,
-                   payload_digest, resource_version, policy_version, version
+                   payload_digest, resource_version, policy_version, version,
+                   requester_username
             FROM pending_approvals
             ORDER BY created_at DESC
         """
@@ -218,6 +224,7 @@ def get_pending_approvals(status_filter: str = None) -> list[dict]:
             "resource_version": row[12],
             "policy_version": row[13],
             "version": row[14],
+            "requester_username": row[15],
         })
     return approvals
 
@@ -291,7 +298,7 @@ def transition_approval_status(
 
     if conn is not None:
         return _transition(conn)
-    with transaction() as owned_conn:
+    with transaction(immediate=True) as owned_conn:
         return _transition(owned_conn)
 
 
@@ -326,7 +333,8 @@ def get_pending_approval_by_id(approval_id: str) -> dict | None:
     query = """
         SELECT approval_id, tool_name, parameters, requester, status, approver,
                created_at, updated_at, reason, checksum, operation_id,
-               payload_digest, resource_version, policy_version, version
+               payload_digest, resource_version, policy_version, version,
+               requester_username
         FROM pending_approvals
         WHERE approval_id = ?
     """
@@ -355,6 +363,7 @@ def get_pending_approval_by_id(approval_id: str) -> dict | None:
         "resource_version": row[12],
         "policy_version": row[13],
         "version": row[14],
+        "requester_username": row[15],
     }
 
 
@@ -379,6 +388,7 @@ def get_pending_list() -> list[dict]:
             "tool": tool_name,
             "args": r["parameters"],
             "role": r["requester"],
+            "requester_username": r["requester_username"],
             "risk": risk_level,
             "operation_id": r["operation_id"],
         })

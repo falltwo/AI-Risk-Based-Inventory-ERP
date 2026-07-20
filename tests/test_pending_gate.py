@@ -70,3 +70,33 @@ def test_no_pending_reply_untouched(monkeypatch):
     assert result["pending"] == []
     assert result["reply"] == "目前庫存共 150 件。"
     assert "審批" not in result["reply"]
+
+
+def test_verified_actor_is_forwarded_to_tool_gateway(monkeypatch):
+    observed = {}
+
+    def fake_gateway_call(tool_name, args, role, **kwargs):
+        observed.update(
+            {
+                "tool_name": tool_name,
+                "args": args,
+                "role": role,
+                **kwargs,
+            }
+        )
+        return SimpleNamespace(status="denied", message="test denial", data=None)
+
+    monkeypatch.setattr(orch.gateway, "call", fake_gateway_call)
+
+    result = orch.execute_tool_call(
+        "create_purchase_order",
+        {"po_id": "PO-ACTOR-PROPAGATION"},
+        "warehouse",
+        agent_id="procurement_agent",
+        actor="wh1",
+        operation_id="agent:tc-actor",
+    )
+
+    assert result["status"] == "denied"
+    assert observed["actor"] == "wh1"
+    assert observed["agent_name"] == "procurement_agent"

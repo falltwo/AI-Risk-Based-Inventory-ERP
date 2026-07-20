@@ -9,6 +9,7 @@ import pandas as pd
 import json
 import os
 from datetime import datetime
+from backend.access_control import load_principal
 from backend.agent_registry import AGENTS, get_tools_for_agent, get_agent_for_tool
 from backend.agent_logger import (
     get_pending_list,
@@ -19,6 +20,21 @@ from backend.agent_logger import (
     write_action_log,
 )
 from backend.database import run_query
+from frontend.access_navigation import dashboard_mode
+
+
+_PURCHASE_PROPOSAL_TOOLS = frozenset(
+    {"create_purchase_order", "sync_external_purchase_order"}
+)
+
+
+def _filter_purchase_proposals(records):
+    """Limit the L3 approver surface to governed purchase proposals."""
+    return [
+        item
+        for item in records
+        if item.get("tool", item.get("tool_name")) in _PURCHASE_PROPOSAL_TOOLS
+    ]
 
 
 def _history_action_kind(status: str, tool_name: str, role: str) -> str:
@@ -122,16 +138,117 @@ def format_parameters_to_chinese(tool_name: str, args) -> str:
     return ", ".join(parts)
 
 
-def render():
-    st.markdown("<div class='premium-title'>🕵️ Agent Dashboard</div>", unsafe_allow_html=True)
-    st.markdown("<p style='color: #64748b; font-size: 1.1rem; margin-bottom: 2rem;'>即時監控專責 AI Agent 的運行狀態、總管派工決策、工具呼叫記錄與敏感操作的審批管理。</p>", unsafe_allow_html=True)
+def _render_purchase_approval_dashboard(principal, pending_list, approval_history):
+    """Focused L3 surface: proposal evidence and decisions, without global logs."""
+    st.markdown(
+        "<div class='premium-title'>✅ L3 採購提案核准</div>",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "只顯示採購單與 ERP CSV 交換提案。核准後才會產生受治理的執行結果，"
+        "所有決策保留稽核紀錄。"
+    )
+    st.metric("待核准採購提案", f"{len(pending_list)} 筆")
 
-    # 示範資料必須明確 opt-in，正常運行不得自動寫入假紀錄。
-    if _demo_seed_enabled():
-        _initialize_demo_data_if_empty()
+    if not pending_list:
+        st.success("目前沒有待核准的採購提案。")
+    for item in pending_list:
+        with st.container(border=True):
+            st.markdown(f"##### 📋 提案單號：`{item['id']}`")
+            st.caption(
+                f"🕒 {item['time']}｜申請角色：`{item['role']}`｜"
+                f"申請人：`{item.get('requester_username') or '舊資料未記錄'}`"
+            )
+            st.markdown(f"**提案類型**：`{item['tool']}`")
+            st.markdown(
+                f"**核准證據**：`{format_parameters_to_chinese(item['tool'], item['args'])}`"
+            )
+            if item.get("operation_id"):
+                st.caption(f"🔗 操作識別碼：`{item['operation_id']}`")
+
+            if item.get("requester_username") == principal.username:
+                st.warning("提案人不得核准自己的提案，請由另一位核准者處理。")
+                continue
+
+            reason = st.text_input(
+                "拒絕原因（核准時免填）",
+                key=f"tier_reason_{item['id']}",
+            )
+            approve_col, reject_col = st.columns(2)
+            with approve_col:
+                if st.button(
+                    "✅ 核准",
+                    key=f"tier_approve_{item['id']}",
+                    use_container_width=True,
+                ):
+                    result = approve_action(item["id"], approver=principal.username)
+                    if result.get("status") in {"ok", "pending"}:
+                        st.toast(f"提案 {item['id']} 已核准。")
+                    else:
+                        st.error(result.get("message") or "核准失敗。")
+                    st.rerun()
+            with reject_col:
+                if st.button(
+                    "❌ 拒絕",
+                    key=f"tier_reject_{item['id']}",
+                    use_container_width=True,
+                ):
+                    if not reason.strip():
+                        st.warning("請先填寫拒絕原因。")
+                    else:
+                        result = reject_action(
+                            item["id"], reason, approver=principal.username
+                        )
+                        if result.get("status") == "denied":
+                            st.toast(f"提案 {item['id']} 已拒絕。")
+                        else:
+                            st.error(result.get("message") or "拒絕失敗。")
+                        st.rerun()
+
+    st.markdown("---")
+    st.markdown("### 🕒 採購提案審批歷史")
+    if not approval_history:
+        st.info("目前沒有採購提案審批歷史。")
+        return
+    for item in approval_history:
+        with st.container(border=True):
+            status_emoji = "✅" if item["status"] == "approved" else "❌"
+            st.markdown(
+                f"**{status_emoji} `{item['id']}`｜{item['status']}｜`{item['tool']}`**"
+            )
+            st.caption(
+                f"申請：{item['time']}｜處理：{item['processed_time']}｜"
+                f"申請人：`{item.get('requester_username') or '舊資料未記錄'}`"
+            )
+            st.markdown(
+                f"**提案內容**：`{format_parameters_to_chinese(item['tool'], item['raw_args'])}`"
+            )
+            if item["reason"]:
+                st.markdown(f"**拒絕原因**：{item['reason']}")
+
+
+def render(username: str = ""):
+    principal = load_principal(username)
+    if principal is None:
+        st.error("登入身分已失效，無法開啟審批頁。")
+        return
+    mode = dashboard_mode(principal)
+    if mode == "none":
+        st.error("此帳號沒有審批佇列的檢視權限。")
+        return
+
+    if mode == "full":
+        st.markdown("<div class='premium-title'>🕵️ Agent Dashboard</div>", unsafe_allow_html=True)
+        st.markdown("<p style='color: #64748b; font-size: 1.1rem; margin-bottom: 2rem;'>即時監控專責 AI Agent 的運行狀態、總管派工決策、工具呼叫記錄與敏感操作的審批管理。</p>", unsafe_allow_html=True)
+
+        # 示範資料必須明確 opt-in，正常運行不得自動寫入假紀錄。
+        if _demo_seed_enabled():
+            _initialize_demo_data_if_empty()
 
     # ── 從資料庫取得最新審批資料 ──────────────────────────────
     pending_list = get_pending_list()
+    if mode == "approvals":
+        pending_list = _filter_purchase_proposals(pending_list)
     pending_count = len(pending_list)
 
     # 讀取歷史審批紀錄
@@ -152,7 +269,16 @@ def render():
                 "reason": app["reason"] or "",
                 "processed_time": app["updated_at"],
                 "operation_id": app.get("operation_id"),
+                "requester_username": app.get("requester_username"),
             })
+
+    if mode == "approvals":
+        _render_purchase_approval_dashboard(
+            principal,
+            pending_list,
+            _filter_purchase_proposals(approval_history),
+        )
+        return
 
     # ── 頂部 Metrics 卡片 ───────────────────────────────────────────────
     total_agents = len(AGENTS)
@@ -238,8 +364,8 @@ def render():
                     with col_item2:
                         st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
                         # 檢查目前登入角色是否為 admin
-                        current_role = st.session_state.get("role", "guest")
-                        current_username = st.session_state.get("username", "")
+                        current_role = principal.role
+                        current_username = principal.username
 
                         if current_role == "admin":
                             # 輸入拒絕原因的文字框
@@ -282,7 +408,7 @@ def render():
             if not approval_history:
                 st.caption("尚無審批歷史紀錄。")
             else:
-                current_role = st.session_state.get("role", "guest")
+                current_role = principal.role
                 for item in approval_history:
                     with st.container(border=True):
                         col_hist_info, col_hist_act = st.columns([4, 1.2])
@@ -490,17 +616,21 @@ def _initialize_demo_data_if_empty():
         # 1. 檢查並寫入待審批項目
         pending_count = run_query("SELECT COUNT(*) FROM pending_approvals")[0][0]
         if pending_count == 0:
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            # 建立兩筆待審批
-            run_query(
-                "INSERT INTO pending_approvals (approval_id, tool_name, parameters, requester, status, approver, created_at, updated_at, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("PENDING-20260604-001", "update_inventory", '{"product_id": "P001", "quantity_change": 120}', "warehouse", "pending", None, now_str, now_str, None),
-                fetch=False
+            from backend.agent_logger import create_pending_approval
+
+            create_pending_approval(
+                "update_inventory",
+                {"product_id": "P001", "quantity_change": 120},
+                "warehouse",
+                requester_username="wh1",
+                operation_id="dashboard-demo-update-inventory-v1",
             )
-            run_query(
-                "INSERT INTO pending_approvals (approval_id, tool_name, parameters, requester, status, approver, created_at, updated_at, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ("PENDING-20260604-002", "create_order", '{"customer_id": "C001", "product_id": "P003", "quantity": 15}', "sales", "pending", None, now_str, now_str, None),
-                fetch=False
+            create_pending_approval(
+                "create_order",
+                {"customer_id": "C001", "product_id": "P003", "quantity": 15},
+                "sales",
+                requester_username="sales1",
+                operation_id="dashboard-demo-create-order-v1",
             )
 
         # 2. 檢查並寫入派工決策紀錄 (B 的派工)

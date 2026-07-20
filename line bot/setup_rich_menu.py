@@ -60,13 +60,20 @@ def create_rich_menu():
         print(f"Rich Menu ID: {rich_menu_id}")
 
         print("[2] 調整並上傳 Rich Menu 圖片 ...")
-        image_path = r"C:\Users\User\.gemini\antigravity\brain\6c4ac423-da28-4a64-b17b-cbd59b41e3a3\erp_rich_menu_flat_1775320445371.png"
+        image_path = os.getenv("LINE_RICH_MENU_IMAGE_PATH", "").strip()
+        if not image_path:
+            print("請先設定 LINE_RICH_MENU_IMAGE_PATH 指向 Rich Menu PNG 圖片。")
+            return
+        if not os.path.isfile(image_path):
+            print("找不到 LINE_RICH_MENU_IMAGE_PATH 指定的圖片。")
+            return
         
         try:
             from PIL import Image
             with Image.open(image_path) as img:
                 img_resized = img.resize((2500, 1686)).convert('RGB')
-                resized_path = image_path.replace(".png", "_resized.jpg")
+                stem, _ = os.path.splitext(image_path)
+                resized_path = f"{stem}_resized.jpg"
                 img_resized.save(resized_path, "JPEG", quality=85)
         except ImportError:
             print("請先安裝 Pillow: pip install Pillow")

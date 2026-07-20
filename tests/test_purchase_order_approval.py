@@ -139,6 +139,7 @@ def _submit_po(*, operation_id="po-submit-session-1", args=None):
         "create_purchase_order",
         submitted_args,
         role="warehouse",
+        actor="wh1",
         agent_name="procurement_agent",
         operation_id=operation_id,
     )
@@ -293,7 +294,7 @@ def test_same_operation_id_returns_the_same_pending_po_approval(isolated_db):
     assert rows[0][0] == first_id
     assert rows[0][1] == operation_id
     assert rows[0][2]
-    assert rows[0][3:] == ("absent", "po-approval-v1", 0)
+    assert rows[0][3:] == ("absent", "po-approval-v2", 0)
 
 
 def test_conditional_approval_transition_allows_only_one_winner(isolated_db):
@@ -355,6 +356,7 @@ def test_canonical_digest_covers_every_effectful_value():
         "args": base_args,
         "resource_version": "absent",
         "policy_version": "po-approval-v1",
+        "requester_username": "wh1",
     }
     baseline = canonical_payload_digest(**digest_kwargs)
 
@@ -373,6 +375,10 @@ def test_canonical_digest_covers_every_effectful_value():
         "note": {**digest_kwargs, "args": {**base_args, "note": "risk-event-43"}},
         "resource_version": {**digest_kwargs, "resource_version": "present:v1"},
         "policy_version": {**digest_kwargs, "policy_version": "po-approval-v2"},
+        "requester_username": {
+            **digest_kwargs,
+            "requester_username": "warehouse-peer",
+        },
     }
     ignored = [
         name
@@ -380,6 +386,43 @@ def test_canonical_digest_covers_every_effectful_value():
         if canonical_payload_digest(**variant) == baseline
     ]
     assert ignored == [], f"digest ignored effectful values: {ignored}"
+
+
+def test_legacy_protected_pending_can_only_be_closed_by_rejection(isolated_db):
+    from backend.agent_logger import create_pending_approval
+    from backend.tool_gateway import gateway
+
+    database.init_db()
+    approval_id = create_pending_approval(
+        "create_purchase_order",
+        {
+            "po_id": "PO-LEGACY-NO-ORIGIN",
+            "supplier_id": "SUP01",
+            "product_id": "P001",
+            "qty": 1,
+            "unit_price": 100.0,
+            "order_date": "2026-07-20",
+            "status": "pending_review",
+            "note": "legacy originator missing",
+        },
+        "warehouse",
+        requester_username=None,
+        operation_id="legacy-no-origin",
+        resource_version="absent",
+    )
+
+    assert gateway.approve_action(approval_id, approver="admin").status == "denied"
+    rejected = gateway.reject_action(
+        approval_id, "migration closeout", approver="admin"
+    )
+
+    assert rejected.status == "denied"
+    row = database.run_query(
+        "SELECT status, reason FROM pending_approvals WHERE approval_id = ?",
+        (approval_id,),
+    )[0]
+    assert row[0] == "rejected"
+    assert "legacy" in row[1].lower()
 
 
 def test_po_tool_is_registered_as_governed_write_and_hidden_from_line():
@@ -934,8 +977,8 @@ def test_ui_sources_use_gateway_operation_id_and_current_approver():
                 for value in approver_values
             ), f"{function_name} hard-codes admin"
 
-    assert "session_state" in dashboard_source
-    assert "username" in dashboard_source
+    assert "load_principal" in dashboard_source
+    assert "principal.username" in dashboard_source
 
 
 def test_protected_decisions_require_an_explicit_current_actor(isolated_db):
@@ -1041,7 +1084,9 @@ def test_agent_tool_call_propagates_a_stable_operation_id(monkeypatch):
 
     captured = []
 
-    def fake_execute(tool_name, args, role, agent_id="", *, operation_id=None):
+    def fake_execute(
+        tool_name, args, role, agent_id="", *, actor=None, operation_id=None
+    ):
         captured.append((tool_name, operation_id))
         return {
             "status": "pending",

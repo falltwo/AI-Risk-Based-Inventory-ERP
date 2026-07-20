@@ -148,6 +148,7 @@ pip install -r requirements.txt
 # 2. 設定模型（.env）
 cp .env.example .env
 #    LLM_MODEL=gemini/gemini-2.5-flash   ← 填你的供應商/模型與對應金鑰
+#    本機比賽 Demo 才設定 ERP_DEMO_MODE=true（會建立並顯示已知測試帳密）
 
 # 3. 啟動
 streamlit run app.py
@@ -155,7 +156,9 @@ streamlit run app.py
 
 登入後左側選單進入「AI 智能助理」即可用自然語言操作；「Agent Dashboard」檢視派工、稽核與待審批。
 
-測試帳號（示範資料）：`admin/admin`（管理者）、`wh1/wh1`（倉管）、`sales1/sales1`（業務）、`hr1/hr1`（人資）。
+當且僅當 `.env` 明確設定 `ERP_DEMO_MODE=true` 時，系統才會建立並顯示測試帳號。此模式只供本機比賽展示，不得用於公開部署。
+
+若某個既有資料庫曾以 Demo 模式初始化，之後把旗標改回 `false` 不會自動刪除帳號；公開或正式部署前必須改用乾淨資料庫，或由管理者移除／輪替所有測試帳密。現階段的 L1/L2/L3 權限模型是單一組織、本機展示邊界，尚未提供多租戶資料列隔離或外部 IAM/SSO，不能直接當成網路服務的正式身分系統。
 
 ### LINE Bot（選用）
 
@@ -168,6 +171,9 @@ python "line bot/bot_server.py"    # FastAPI 於 :8000，webhook 需公開網址
 
 | 環境變數 | 用途 | 預設 |
 |---------|------|------|
+| `ERP_DEMO_MODE` | 建立合成資料與已知 Demo 帳密；僅限本機展示 | `false` |
+| `ERP_SCHEDULER_ACTOR` | 背景新聞刷新使用的 ERP 服務身分；未設定時排程停用 | 未設定 |
+| `LINE_RICH_MENU_IMAGE_PATH` | 執行 LINE Rich Menu 設定腳本時使用的本機 PNG 路徑 | 未設定 |
 | `LLM_MODEL` | 主模型（LiteLLM 格式 `provider/model`），AI 助理與分析頁共用 | `gemini/gemini-2.5-flash` |
 | `LLM_FALLBACK_MODELS` | 備援模型（逗號分隔，主模型失敗時依序切換） | `openai/kimi-k2.6,gemini/gemini-2.5-flash` |
 | `LLM_ANALYSIS_MODEL` | 分析副任務別名（選填；新聞歸類/翻譯可指到較便宜模型） | 未設＝用主模型鏈 |
@@ -176,6 +182,8 @@ python "line bot/bot_server.py"    # FastAPI 於 :8000，webhook 需公開網址
 | `GNEWS_API_KEY` | 供應鏈新聞來源（選用） | — |
 | `ERP_DB_PATH` | 資料庫路徑（企業可指定既有 .db） | `data/erp.db` |
 | `LINE_CHANNEL_ACCESS_TOKEN` / `LINE_CHANNEL_SECRET` | LINE Bot 憑證（選用） | — |
+
+若一般（非採購／ERP 交換）寫入在效果完成後、執行收據落庫前中斷，審批會安全停在 `executing`，系統不會自動重試。處理方式見 [Generic approval reconciliation runbook](docs/generic_approval_reconciliation.md)。
 
 ## 測試
 

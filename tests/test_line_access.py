@@ -56,6 +56,27 @@ def test_line_tool_filter_is_fail_closed():
     ]
 
 
+def test_line_execution_guard_rejects_write_even_if_model_names_it():
+    registry = FakeRegistry()
+
+    assert line_access.is_line_tool_allowed(
+        "inventory_read", registry, "warehouse"
+    )
+    assert not line_access.is_line_tool_allowed(
+        "inventory_write", registry, "warehouse"
+    )
+    assert not line_access.is_line_tool_allowed("unknown", registry, "warehouse")
+
+
+def test_line_gateway_rechecks_execution_boundary():
+    source = (
+        Path(__file__).resolve().parents[1] / "line bot" / "bot_server.py"
+    ).read_text(encoding="utf-8")
+
+    assert "is_line_tool_allowed(tool_name, registry, role)" in source
+    assert "gateway.call(tool_name, args or {}, role=role)" in source
+
+
 def test_briefing_user_ids_are_trimmed_and_deduplicated():
     assert line_access.parse_line_user_ids(" U1, U2,U1, ,U3 ") == ("U1", "U2", "U3")
     assert line_access.parse_line_user_ids(None) == ()

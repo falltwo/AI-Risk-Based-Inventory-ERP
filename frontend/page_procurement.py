@@ -9,8 +9,10 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 from backend import DB_FILE, run_query
+from backend.access_control import load_principal
 from backend.agent_logger import get_pending_approval_by_id
 from backend.tool_gateway import gateway
+from frontend.access_navigation import build_menu_structure
 
 
 def ensure_po_operation_id(state) -> str:
@@ -43,16 +45,24 @@ def resolve_po_approval_state(
     return approval_id, approval.get("status")
 
 
-def render(sub_menu: str):
+def render(sub_menu: str, username: str = ""):
+    principal = load_principal(username)
+    if principal is None:
+        st.error("登入身分已失效，無法開啟採購功能。")
+        return
+    menus = build_menu_structure(principal).get("🛒 採購管理", [])
+    if sub_menu not in menus:
+        st.error("此帳號沒有這項採購功能的權限。")
+        return
+
     st.markdown("<div class='premium-title'>🛒 採購管理</div>", unsafe_allow_html=True)
-    menus = ['採購單', '供應商管理', '進貨成本', '採購歷史', 'ERP CSV 交換']
     styled_menus = [f"🌟 **{m}**" if m == sub_menu else f"{m}" for m in menus]
     st.markdown(" ｜ ".join(styled_menus))
 
     if sub_menu == "ERP CSV 交換":
         from frontend.page_erp_csv_exchange import render as render_erp_csv_exchange
 
-        render_erp_csv_exchange()
+        render_erp_csv_exchange(username=principal.username)
         return
 
     if sub_menu == "採購單":
@@ -113,7 +123,8 @@ def render(sub_menu: str):
                                 "status": "待入庫",
                                 "note": note or "",
                             },
-                            role=st.session_state.get("role", "guest"),
+                            role=principal.role,
+                            actor=principal.username,
                             agent_name="procurement_agent",
                             operation_id=operation_id,
                         )

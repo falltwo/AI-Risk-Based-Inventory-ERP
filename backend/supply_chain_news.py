@@ -12,6 +12,8 @@ import email.utils
 from typing import List, Optional
 from urllib.parse import quote_plus
 
+from .access_control import RISK_WORKSPACE_WRITE, require_capability
+
 # 國家名稱 → 英文搜尋用 / 雙碼（給 GNews API 用）
 COUNTRY_MAP = {
     "台灣": ("Taiwan", "TW"),
@@ -243,10 +245,20 @@ def get_news_from_db(
     return [dict(r) for r in rows]
 
 
-def refresh_news_for_countries(countries: List[str], gemini_api_key: Optional[str] = None, gnews_api_key: Optional[str] = None, max_per_country: int = 15, within_days: int = 7, gemini_model: str = "gemini-2.5-flash") -> dict:
+def refresh_news_for_countries(
+    countries: List[str],
+    gemini_api_key: Optional[str] = None,
+    gnews_api_key: Optional[str] = None,
+    max_per_country: int = 15,
+    within_days: int = 7,
+    gemini_model: str = "gemini-2.5-flash",
+    *,
+    actor: str | None = None,
+) -> dict:
     """
     為多個國家平行抓取新聞，並使用批量 AI 歸類以極大化提升效能。
     """
+    require_capability(actor, RISK_WORKSPACE_WRITE)
     import concurrent.futures
     from .supply_chain_risk import batch_infer_affected_region_from_news
     from .llm_client import llm_available
@@ -318,9 +330,11 @@ def refresh_news_for_countries(countries: List[str], gemini_api_key: Optional[st
             ref_date = datetime.now().strftime("%Y-%m-%d")
             summary_text, updates, _ = get_heatmap_ai_summary(news_context=news_context, reference_date=ref_date)
             if updates:
-                apply_heatmap_updates(updates, summary_text)
+                apply_heatmap_updates(updates, summary_text, actor=actor)
+        except PermissionError:
+            raise
         except Exception:
-            pass 
+            pass
 
     return {
         "updated": total_saved, 

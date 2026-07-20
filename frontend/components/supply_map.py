@@ -70,7 +70,7 @@ def render_risk_heatmap(key: str = "risk_heatmap", heatmap_rows=None):
         )
         st.plotly_chart(fig, use_container_width=True, key=key)
 
-def render_risk_shortcuts(key: str, heatmap_rows=None):
+def render_risk_shortcuts(key: str, heatmap_rows=None, *, actor: str):
     """區域風險快速分析小卡。"""
     if heatmap_rows is None:
         heatmap_rows = get_risk_heatmap_data()
@@ -179,7 +179,9 @@ def render_risk_shortcuts(key: str, heatmap_rows=None):
                             ev_r = dn_parts[1].strip() if len(dn_parts) > 1 else ""
                             
                             from backend.supply_chain_risk import add_risk_event
-                            add_risk_event(etype, ev_r, ev_c, impact_days, desc)
+                            add_risk_event(
+                                etype, ev_r, ev_c, impact_days, desc, actor=actor
+                            )
                             st.toast(f"✅ 已將 {reg_display} 的數據更新", icon="🔄")
                             st.rerun()
                     elif btn_state == "ready":
@@ -192,7 +194,9 @@ def render_risk_shortcuts(key: str, heatmap_rows=None):
                             ev_c = dn_parts[0].strip()
                             ev_r = dn_parts[1].strip() if len(dn_parts) > 1 else ""
                             from backend.supply_chain_risk import add_risk_event
-                            add_risk_event(etype, ev_r, ev_c, impact_days, desc)
+                            add_risk_event(
+                                etype, ev_r, ev_c, impact_days, desc, actor=actor
+                            )
                             st.session_state["heatmap_needs_refresh"] = True
                             st.toast(f"📍 已啟動 {reg_display} 應變計畫", icon="🤖")
                             st.rerun()
@@ -204,7 +208,9 @@ def render_risk_shortcuts(key: str, heatmap_rows=None):
                             ev_c = dn_parts[0].strip()
                             ev_r = dn_parts[1].strip() if len(dn_parts) > 1 else ""
                             from backend.supply_chain_risk import add_risk_event
-                            add_risk_event(etype, ev_r, ev_c, impact_days, desc)
+                            add_risk_event(
+                                etype, ev_r, ev_c, impact_days, desc, actor=actor
+                            )
                             st.session_state["heatmap_needs_refresh"] = True
                             st.rerun()
 
@@ -243,12 +249,25 @@ def render_risk_shortcuts(key: str, heatmap_rows=None):
                             else:
                                 impact_days, etype, desc = 7, "其他", f"快速登錄：AI 偵測到 {selected_r['display_name']} 之 {selected_r['risk_pct']}% 地理風險。"
                             from backend.supply_chain_risk import add_risk_event
-                            new_id = add_risk_event(etype, clean_loc, clean_loc, impact_days, desc)
+                            new_id = add_risk_event(
+                                etype,
+                                clean_loc,
+                                clean_loc,
+                                impact_days,
+                                desc,
+                                actor=actor,
+                            )
                             st.session_state["heatmap_needs_refresh"] = True
                             if match: st.toast(f"📍 已採用 AI 建議之 {impact_days} 天延遲 (類型: {etype})", icon="🤖")
                             st.rerun()
 
-def render_supply_chain_map(api_key: str, gnews_api_key: str, gemini_model: str = "gemini-2.5-flash"):
+def render_supply_chain_map(
+    api_key: str,
+    gnews_api_key: str,
+    gemini_model: str = "gemini-2.5-flash",
+    *,
+    actor: str,
+):
     """供應鏈地圖：第一層即時風險熱圖 + AI 摘要，第二層受災採購清單，第三層 What-If 模擬。"""
     st.subheader("🌍 原物料風險管理地圖")
     st.caption("熱圖顯示與管理、AI 深度摘要。")
@@ -286,7 +305,7 @@ def render_supply_chain_map(api_key: str, gnews_api_key: str, gemini_model: str 
             st.rerun()
     with col_reset:
         if st.button("🔄 重置為初始熱圖", key="reset_heatmap_btn"):
-            reset_risk_heatmap_to_initial()
+            reset_risk_heatmap_to_initial(actor=actor)
             for key in ["heatmap_ai_summary", "heatmap_updates", "suggested_events"]:
                 if key in st.session_state: del st.session_state[key]
             st.success("已重置為初始熱圖。")
@@ -376,7 +395,11 @@ def render_supply_chain_map(api_key: str, gnews_api_key: str, gemini_model: str 
                                 break
                     st.session_state["suggested_events"] = current_suggested
 
-                    cnt = apply_heatmap_updates(final_updates, st.session_state["heatmap_ai_summary"])
+                    cnt = apply_heatmap_updates(
+                        final_updates,
+                        st.session_state["heatmap_ai_summary"],
+                        actor=actor,
+                    )
                     st.session_state["heatmap_apply_success"] = f"✅ 已成功同步 {cnt} 個地區的風險等級與天數設定！"
                     if "heatmap_updates" in st.session_state:
                         del st.session_state["heatmap_updates"]
@@ -396,7 +419,9 @@ def render_supply_chain_map(api_key: str, gnews_api_key: str, gemini_model: str 
 
     st.markdown("<br>", unsafe_allow_html=True)
     # ── 🔍 區域風險摘要與快速分析 (Regional Impact Shortcuts) ──────────
-    render_risk_shortcuts(key="detail_shortcuts", heatmap_rows=heatmap_rows)
+    render_risk_shortcuts(
+        key="detail_shortcuts", heatmap_rows=heatmap_rows, actor=actor
+    )
 
     # ── 手動調節熱圖風險% (使用 st.data_editor) ────────────────────────
     if heatmap_rows:
@@ -429,10 +454,16 @@ def render_supply_chain_map(api_key: str, gnews_api_key: str, gemini_model: str 
                                 orig_row["longitude"],
                                 float(new_val),
                                 (orig_row.get("ai_summary") or "")[:500],
+                                actor=actor,
                             )
                     st.success("地圖已更新。")
 
-def render_what_if_analysis(api_key: str, gemini_model: str = "gemini-2.5-flash"):
+def render_what_if_analysis(
+    api_key: str,
+    gemini_model: str = "gemini-2.5-flash",
+    *,
+    actor: str,
+):
     """模擬情境分析 (What-If Simulation)。"""
     st.markdown("---")
     with st.expander("🔮 模擬情境分析 (What-If Simulation)", expanded=True):
@@ -460,7 +491,9 @@ def render_what_if_analysis(api_key: str, gemini_model: str = "gemini-2.5-flash"
         )
         if st.button("執行 What-If 模擬分析", key="whatif_btn"):
             with st.spinner("AI 正在依供應商、採購單與庫存資料分析情境…"):
-                answer = what_if_simulation(api_key, user_question, model=gemini_model)
+                answer = what_if_simulation(
+                    api_key, user_question, model=gemini_model, actor=actor
+                )
             st.markdown("**AI 回覆**")
             # 隱藏技術後綴
             clean_answer = answer.split("【自動化指令】")[0].strip()

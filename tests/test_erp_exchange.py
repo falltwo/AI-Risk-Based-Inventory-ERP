@@ -72,10 +72,10 @@ def _row(**overrides):
     return row
 
 
-def _stage_one(source_system="odoo-demo", **overrides):
+def _stage_one(source_system="odoo-demo", *, actor="wh1", **overrides):
     exchange = _exchange_module()
     rows = exchange.parse_purchase_order_csv(_csv_bytes([_row(**overrides)]))
-    return exchange.stage_purchase_order_rows(source_system, rows)
+    return exchange.stage_purchase_order_rows(source_system, rows, actor=actor)
 
 
 def _submit_one(source_system="odoo-demo", external_id="odoo.purchase_order_1001"):
@@ -90,6 +90,7 @@ def _submit_one(source_system="odoo-demo", external_id="odoo.purchase_order_1001
         "sync_external_purchase_order",
         {"source_system": source_system, "external_id": external_id},
         role="warehouse",
+        actor="wh1",
         agent_name="procurement_agent",
         operation_id=operation_id,
     )
@@ -191,7 +192,7 @@ def test_stage_preview_joins_supplier_risk_without_inventing_ai_result(exchange_
     exchange = _exchange_module()
     _stage_one()
 
-    records = exchange.list_exchange_records("odoo-demo")
+    records = exchange.list_exchange_records("odoo-demo", actor="wh1")
 
     assert len(records) == 1
     assert records[0]["supplier_country"] == "日本"
@@ -214,13 +215,13 @@ def test_stage_rejects_unknown_product_and_non_official_supplier(exchange_db):
         _csv_bytes([_row(supplier_id="SUP02")])
     )
     with pytest.raises(ValueError, match="正式供應商"):
-        exchange.stage_purchase_order_rows("odoo-demo", non_official)
+        exchange.stage_purchase_order_rows("odoo-demo", non_official, actor="wh1")
 
     unknown_product = exchange.parse_purchase_order_csv(
         _csv_bytes([_row(product_id="MISSING")])
     )
     with pytest.raises(ValueError, match="product_id"):
-        exchange.stage_purchase_order_rows("odoo-demo", unknown_product)
+        exchange.stage_purchase_order_rows("odoo-demo", unknown_product, actor="wh1")
 
 
 def test_stage_rejects_duplicate_po_identity_without_partial_write(exchange_db):
@@ -235,7 +236,7 @@ def test_stage_rejects_duplicate_po_identity_without_partial_write(exchange_db):
     )
 
     with pytest.raises(ValueError, match="重複 po_id"):
-        exchange.stage_purchase_order_rows("odoo-demo", rows)
+        exchange.stage_purchase_order_rows("odoo-demo", rows, actor="wh1")
 
     with sqlite3.connect(exchange_db) as conn:
         assert conn.execute(

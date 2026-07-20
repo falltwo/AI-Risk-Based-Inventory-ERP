@@ -1,6 +1,7 @@
 import streamlit as st
 import re
 import pandas as pd
+from backend.access_control import ERP_POLICY_WRITE, has_capability
 from backend.supply_chain_news import get_news_from_db, refresh_news_for_countries
 from backend.supply_chain_risk import (
     translate_to_chinese_traditional,
@@ -22,6 +23,12 @@ from backend.supply_chain_risk import (
     get_risk_heatmap_data,
 )
 
+
+def can_write_erp_policy(actor: str) -> bool:
+    """Resolve ERP policy write visibility from the live principal."""
+    return has_capability(actor, ERP_POLICY_WRITE)
+
+
 def _auto_refresh_heatmap_ai(api_key, gemini_model):
     from backend.supply_chain_risk import get_heatmap_ai_summary
     from datetime import datetime
@@ -41,7 +48,13 @@ def _auto_refresh_heatmap_ai(api_key, gemini_model):
     if "heatmap_needs_refresh" in st.session_state:
         del st.session_state["heatmap_needs_refresh"]
 
-def render_intelligence_gathering(api_key: str = "", gnews_api_key: str = "", gemini_model: str = "gemini-2.5-flash"):
+def render_intelligence_gathering(
+    api_key: str = "",
+    gnews_api_key: str = "",
+    gemini_model: str = "gemini-2.5-flash",
+    *,
+    actor: str,
+):
     """
     第一階段：🔍 即時全球情報 (Intelligence)
     職責：抓取全球新聞、AI 自動歸類與風險等級評估、登錄為正式風險事件。
@@ -100,7 +113,8 @@ def render_intelligence_gathering(api_key: str = "", gnews_api_key: str = "", ge
                     gnews_api_key=gnews_api_key or None, 
                     max_per_country=8, 
                     within_days=within_days,
-                    gemini_model=gemini_model
+                    gemini_model=gemini_model,
+                    actor=actor,
                 )
                 fetched = res.get("fetched_count", 0)
                 filtered = res.get("filtered_count", 0)
@@ -187,7 +201,8 @@ def render_intelligence_gathering(api_key: str = "", gnews_api_key: str = "", ge
                                 country=n.get("country") or "",
                                 impact_days=n.get("estimated_delay") or 7,
                                 description=f"【一鍵批量登錄】{n.get('title')}",
-                                news_id=n.get('id')
+                                news_id=n.get('id'),
+                                actor=actor,
                             )
                             bulk_count += 1
                         st.session_state["heatmap_needs_refresh"] = True
@@ -220,7 +235,15 @@ def render_intelligence_gathering(api_key: str = "", gnews_api_key: str = "", ge
                 def_delay = chosen.get("estimated_delay") or 0
                 
                 if st.button(f"🚀 一鍵登錄：{def_etype}風險 (預估延遲 {def_delay} 天)", type="primary", use_container_width=True):
-                    add_risk_event(def_etype, def_region, def_country, def_delay, f"【自動登錄】{chosen.get('title')}", news_id=chosen.get('id'))
+                    add_risk_event(
+                        def_etype,
+                        def_region,
+                        def_country,
+                        def_delay,
+                        f"【自動登錄】{chosen.get('title')}",
+                        news_id=chosen.get('id'),
+                        actor=actor,
+                    )
                     st.session_state["heatmap_needs_refresh"] = True
                     st.success("事件已登錄！記得至地圖區更新 AI 摘要。")
                     st.rerun()
@@ -238,12 +261,20 @@ def render_intelligence_gathering(api_key: str = "", gnews_api_key: str = "", ge
                 m_impact = st.number_input("預估延遲天數", min_value=0, value=0)
             m_desc = st.text_area("事件說明")
             if st.form_submit_button("新增事件"):
-                add_risk_event(m_etype, m_region, m_country, m_impact, m_desc)
+                add_risk_event(
+                    m_etype, m_region, m_country, m_impact, m_desc, actor=actor
+                )
                 st.session_state["heatmap_needs_refresh"] = True
                 st.success("手動事件已登錄！記得至地圖區更新 AI 摘要。")
                 st.rerun()
 
-def render_response_execution(api_key: str = "", gnews_api_key: str = "", gemini_model: str = "gemini-2.5-flash"):
+def render_response_execution(
+    api_key: str = "",
+    gnews_api_key: str = "",
+    gemini_model: str = "gemini-2.5-flash",
+    *,
+    actor: str,
+):
     """
     第二階段：🚨 執行應變與衝擊分析 (Action)
     職責：針對已登錄的風險事件，快速分析其對供應商、庫存、銷售訂單的實際衝擊。
@@ -340,7 +371,7 @@ def render_response_execution(api_key: str = "", gnews_api_key: str = "", gemini
             st.warning("確認移除此事件？此操作無法復原。")
             ev_id = int(active_ev["id"])
             if st.button("🔴 確認點擊刪除", key=f"del_btn_{ev_id}", type="primary", use_container_width=True):
-                delete_risk_event(ev_id)
+                delete_risk_event(ev_id, actor=actor)
                 st.success("事件已從清單中移除。")
                 st.rerun()
 
@@ -354,22 +385,35 @@ def render_response_execution(api_key: str = "", gnews_api_key: str = "", gemini
         if stock_alerts:
             etype = active_ev.get('event_type', '其他')
             st.caption(f"針對此 **{etype}** 事件造成的預計 **{impact_days} 天** 延期，系統建議動態調整受影響物料的安全水位。")
-            
-            ai_mult = get_ai_safety_multiplier(etype)
-            btn_label = f"🤖 AI 建議：一鍵動態調高受影響物料安全水位 (+{impact_days}天需求 ⚡)"
-            
-            if st.button(btn_label, key="adj_stock_btn_dynamic", type="primary"):
-                from backend.supply_chain_risk import increase_safety_stock_for_event
-                cnt = increase_safety_stock_for_event(region, country, impact_days=impact_days, multiplier=ai_mult)
-                st.success(f"✅ 已依據預期延遲與日銷量，完成 {cnt} 項物料的安全水位動態調整！")
-                st.rerun()
-            
-            with st.popover("🔄 重設風險緩衝 (Restore Baseline)", use_container_width=True):
-                st.warning("這將把所有物料的安全水位恢復至原始基準值 (Baseline)。")
-                if st.button("🔴 確認還原所有基準水位", key="restore_baseline_btn"):
-                    restore_all_rop_to_baseline()
-                    st.success("已還原所有物料至基準水位。")
+
+            can_write_policy = can_write_erp_policy(actor)
+            if can_write_policy:
+                ai_mult = get_ai_safety_multiplier(etype)
+                btn_label = f"🤖 AI 建議：一鍵動態調高受影響物料安全水位 (+{impact_days}天需求 ⚡)"
+
+                if st.button(btn_label, key="adj_stock_btn_dynamic", type="primary"):
+                    from backend.supply_chain_risk import increase_safety_stock_for_event
+                    cnt = increase_safety_stock_for_event(
+                        region,
+                        country,
+                        impact_days=impact_days,
+                        multiplier=ai_mult,
+                        actor=actor,
+                    )
+                    st.success(f"✅ 已依據預期延遲與日銷量，完成 {cnt} 項物料的安全水位動態調整！")
                     st.rerun()
+
+                with st.popover("🔄 重設風險緩衝 (Restore Baseline)", use_container_width=True):
+                    st.warning("這將把所有物料的安全水位恢復至原始基準值 (Baseline)。")
+                    if st.button("🔴 確認還原所有基準水位", key="restore_baseline_btn"):
+                        restore_all_rop_to_baseline(actor=actor)
+                        st.success("已還原所有物料至基準水位。")
+                        st.rerun()
+            else:
+                st.info(
+                    "目前帳號可分析風險，但不能直接修改 ERP 安全庫存政策；"
+                    "請透過受治理提案送交具權限人員審核。"
+                )
             
             df_stk = pd.DataFrame(stock_alerts).rename(columns={
                 "product_name": "物料名稱", "stock": "現有庫存", "projected_stock": "延期後剩餘", "reorder_point": "原安全水位", "suggestion": "建議"
