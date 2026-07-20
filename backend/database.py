@@ -231,6 +231,41 @@ def init_db():
       AND strftime('%s', a.timestamp) >= strftime('%s', d.timestamp)
       AND strftime('%s', a.timestamp) - strftime('%s', d.timestamp) <= 120''')
 
+    # 所有入口最終都會寫入審批帳本；不以 Agent 派工紀錄代替審批事實。
+    c.execute("DROP VIEW IF EXISTS view_approval_summary")
+    c.execute('''CREATE VIEW view_approval_summary AS
+    SELECT
+      COUNT(*) AS total_requests,
+      SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_requests,
+      SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved_requests,
+      SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected_requests
+    FROM pending_approvals''')
+
+    c.execute("DROP VIEW IF EXISTS view_governance_daily_trend")
+    c.execute('''CREATE VIEW view_governance_daily_trend AS
+    SELECT
+      activity_date AS date,
+      SUM(total_dispatches) AS total_dispatches,
+      SUM(approval_requests) AS approval_requests
+    FROM (
+      SELECT
+        substr(timestamp, 1, 10) AS activity_date,
+        COUNT(*) AS total_dispatches,
+        0 AS approval_requests
+      FROM agent_dispatch_logs
+      WHERE timestamp IS NOT NULL AND length(timestamp) >= 10
+      GROUP BY activity_date
+      UNION ALL
+      SELECT
+        substr(created_at, 1, 10) AS activity_date,
+        0 AS total_dispatches,
+        COUNT(*) AS approval_requests
+      FROM pending_approvals
+      WHERE created_at IS NOT NULL AND length(created_at) >= 10
+      GROUP BY activity_date
+    )
+    GROUP BY activity_date''')
+
     # 供應商擴充：地理位置與風險（供應鏈地圖、ESG）
     try:
         c.execute("SELECT country FROM suppliers LIMIT 1")

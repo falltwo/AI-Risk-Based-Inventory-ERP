@@ -573,6 +573,38 @@ def test_approval_commits_po_item_receipt_and_final_state_once(isolated_db):
     }
 
 
+def test_governance_metrics_count_direct_approved_po_without_fake_dispatch(
+    isolated_db,
+):
+    from backend.tool_gateway import gateway
+
+    database.init_db()
+    pending = _submit_po(operation_id="metrics-direct-po")
+    approved = gateway.approve_action(pending.approval_id, approver="admin")
+
+    assert approved.status == "ok"
+    assert database.run_query(
+        "SELECT total_requests, approved_requests FROM view_approval_summary"
+    ) == [(1, 1)]
+
+    created_day = database.run_query(
+        """
+        SELECT substr(created_at, 1, 10)
+        FROM pending_approvals
+        WHERE approval_id = ?
+        """,
+        (pending.approval_id,),
+    )[0][0]
+    assert database.run_query(
+        """
+        SELECT total_dispatches, approval_requests
+        FROM view_governance_daily_trend
+        WHERE date = ?
+        """,
+        (created_day,),
+    ) == [(0, 1)]
+
+
 def test_concurrent_approvals_share_one_committed_effect(isolated_db):
     from backend.tool_gateway import gateway
 
