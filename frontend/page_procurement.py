@@ -4,51 +4,127 @@ frontend/page_procurement.py
 """
 
 import sqlite3
+import uuid
 import streamlit as st
 import pandas as pd
 from datetime import datetime
 from backend import DB_FILE, run_query
+from backend.agent_logger import get_pending_approval_by_id
+from backend.tool_gateway import gateway
+
+
+def ensure_po_operation_id(state) -> str:
+    """Keep one operation ID stable across Streamlit reruns for the same draft."""
+    operation_id = state.get("po_operation_id")
+    if not operation_id:
+        operation_id = uuid.uuid4().hex
+        state["po_operation_id"] = operation_id
+    return operation_id
+
+
+def start_new_po_operation(state) -> str:
+    """Rotate the idempotency key only after the user explicitly starts a new PO."""
+    operation_id = uuid.uuid4().hex
+    state["po_operation_id"] = operation_id
+    state.pop("po_last_approval_id", None)
+    return operation_id
+
+
+def resolve_po_approval_state(
+    state, approval_lookup=get_pending_approval_by_id
+) -> tuple[str | None, str | None]:
+    """Resolve the durable approval state instead of trusting stale UI state."""
+    approval_id = state.get("po_last_approval_id")
+    if not approval_id:
+        return None, None
+    approval = approval_lookup(approval_id)
+    if not approval:
+        return approval_id, "missing"
+    return approval_id, approval.get("status")
 
 
 def render(sub_menu: str):
     st.markdown("<div class='premium-title'>🛒 採購管理</div>", unsafe_allow_html=True)
-    menus = ['採購單', '供應商管理', '進貨成本', '採購歷史']
+    menus = ['採購單', '供應商管理', '進貨成本', '採購歷史', 'ERP CSV 交換']
     styled_menus = [f"🌟 **{m}**" if m == sub_menu else f"{m}" for m in menus]
     st.markdown(" ｜ ".join(styled_menus))
+
+    if sub_menu == "ERP CSV 交換":
+        from frontend.page_erp_csv_exchange import render as render_erp_csv_exchange
+
+        render_erp_csv_exchange()
+        return
 
     if sub_menu == "採購單":
         st.subheader("採購單", divider="blue")
         with st.expander("➕ 建立採購單"):
-            with st.form("add_po"):
-                po_id = st.text_input("採購單號", value=f"PO-{datetime.now().strftime('%Y%m%d%H%M')}")
-                df_sup = pd.read_sql_query("SELECT supplier_id, name FROM suppliers WHERE is_official = 1", sqlite3.connect(DB_FILE))
-                sup_opts = [f"{r['supplier_id']} - {r['name']}" for _, r in df_sup.iterrows()] if not df_sup.empty else []
-                sup_sel = st.selectbox("正式供應商", sup_opts) if sup_opts else None
-                sup = sup_sel.split(" - ")[0] if sup_sel else st.text_input("供應商代號")
-                
-                df_prod = pd.read_sql_query("SELECT product_id, name FROM inventory", sqlite3.connect(DB_FILE))
-                prod_opts = [f"{r['product_id']} - {r['name']}" for _, r in df_prod.iterrows()] if not df_prod.empty else []
-                prod_sel = st.selectbox("品項", prod_opts) if prod_opts else None
-                prod = prod_sel.split(" - ")[0] if prod_sel else None
-                qty = st.number_input("數量", min_value=1)
-                unit_price = st.number_input("單價", min_value=0.0)
-                note = st.text_input("備註")
-                if st.form_submit_button("建立") and po_id and sup and prod:
-                    try:
-                        total = qty * unit_price
-                        run_query(
-                            "INSERT INTO purchase_orders VALUES (?,?,?,?,?,?)",
-                            (po_id, sup, datetime.now().strftime("%Y-%m-%d"), "待入庫", total, note or None),
-                            fetch=False,
+            operation_id = ensure_po_operation_id(st.session_state)
+            st.caption(f"本次操作識別碼：`{operation_id}`")
+            last_approval_id, approval_status = resolve_po_approval_state(
+                st.session_state
+            )
+            if last_approval_id:
+                if approval_status == "pending":
+                    st.info(
+                        f"審批單 `{last_approval_id}` 等待核准；"
+                        "採購單尚未建立。"
+                    )
+                elif approval_status == "approved":
+                    st.success(
+                        f"審批單 `{last_approval_id}` 已核准並完成採購單建立。"
+                    )
+                elif approval_status == "rejected":
+                    st.warning(
+                        f"審批單 `{last_approval_id}` 已被拒絕，未建立採購單。"
+                    )
+                else:
+                    st.error(
+                        f"無法讀取審批單 `{last_approval_id}` 的目前狀態。"
+                    )
+                if st.button("建立下一張採購單", key="start_next_po"):
+                    start_new_po_operation(st.session_state)
+                    st.rerun()
+
+            if not last_approval_id:
+                with st.form("add_po"):
+                    po_id = st.text_input("採購單號", value=f"PO-{datetime.now().strftime('%Y%m%d%H%M')}")
+                    df_sup = pd.read_sql_query("SELECT supplier_id, name FROM suppliers WHERE is_official = 1", sqlite3.connect(DB_FILE))
+                    sup_opts = [f"{r['supplier_id']} - {r['name']}" for _, r in df_sup.iterrows()] if not df_sup.empty else []
+                    sup_sel = st.selectbox("正式供應商", sup_opts) if sup_opts else None
+                    sup = sup_sel.split(" - ")[0] if sup_sel else st.text_input("供應商代號")
+
+                    df_prod = pd.read_sql_query("SELECT product_id, name FROM inventory", sqlite3.connect(DB_FILE))
+                    prod_opts = [f"{r['product_id']} - {r['name']}" for _, r in df_prod.iterrows()] if not df_prod.empty else []
+                    prod_sel = st.selectbox("品項", prod_opts) if prod_opts else None
+                    prod = prod_sel.split(" - ")[0] if prod_sel else None
+                    qty = st.number_input("數量", min_value=1)
+                    unit_price = st.number_input("單價", min_value=0.0)
+                    note = st.text_input("備註")
+                    if st.form_submit_button("建立") and po_id and sup and prod:
+                        result = gateway.call(
+                            "create_purchase_order",
+                            {
+                                "po_id": po_id.strip(),
+                                "supplier_id": sup,
+                                "product_id": prod,
+                                "qty": int(qty),
+                                "unit_price": float(unit_price),
+                                "order_date": datetime.now().strftime("%Y-%m-%d"),
+                                "status": "待入庫",
+                                "note": note or "",
+                            },
+                            role=st.session_state.get("role", "guest"),
+                            agent_name="procurement_agent",
+                            operation_id=operation_id,
                         )
-                        run_query(
-                            "INSERT INTO purchase_order_items (po_id, product_id, qty, unit_price) VALUES (?,?,?,?)",
-                            (po_id, prod, qty, unit_price),
-                            fetch=False,
-                        )
-                        st.success(f"採購單 {po_id} 已建立，金額 {total:,.0f} 元")
-                    except sqlite3.IntegrityError:
-                        st.error("採購單號已存在")
+                        if result.status == "pending":
+                            st.session_state["po_last_approval_id"] = result.approval_id
+                            st.success(
+                                f"採購單 {po_id} 已送審（{result.approval_id}）；"
+                                "目前尚未寫入 ERP。"
+                            )
+                        else:
+                            st.error(result.message or "採購單送審失敗。")
         try:
             df = pd.read_sql_query(
                 """SELECT p.po_id as 採購單號, s.name as 供應商, p.order_date as 日期, p.status as 狀態, p.total_amount as 金額 FROM purchase_orders p 

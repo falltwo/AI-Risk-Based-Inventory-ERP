@@ -120,16 +120,15 @@ def verify_agent_dispatch_logs() -> dict:
     )
 
 
-def rebuild_chain_from(table: str, id_col: str, start_id, columns: tuple) -> None:
+def rebuild_chain_from(table: str, id_col: str, start_id, columns: tuple, conn=None) -> None:
     """
     從指定記錄開始重新計算該表後續所有記錄的 checksum。
     用於 pending_approvals 的 UPDATE 操作後，重建鏈。
     整段包在 transaction() 內，避免中途崩潰殘留半條新鏈半條舊鏈。
     """
-    from backend.database import transaction
-    with transaction() as conn:
+    def _rebuild(active_conn):
         query = f"SELECT {id_col}, {', '.join(columns)} FROM {table} ORDER BY {id_col} ASC"
-        rows = tx_run(conn, query)
+        rows = tx_run(active_conn, query)
 
         prev_checksum = None
         found_start = False
@@ -139,11 +138,19 @@ def rebuild_chain_from(table: str, id_col: str, start_id, columns: tuple) -> Non
             if row_id == start_id:
                 found_start = True
                 prev_query = f"SELECT checksum FROM {table} WHERE {id_col} < ? ORDER BY {id_col} DESC LIMIT 1"
-                prev_rows = tx_run(conn, prev_query, (start_id,))
+                prev_rows = tx_run(active_conn, prev_query, (start_id,))
                 prev_checksum = prev_rows[0][0] if prev_rows and prev_rows[0][0] else GENESIS_HASH
 
             if found_start:
                 new_checksum = compute_checksum(prev_checksum, *data_fields)
                 update_query = f"UPDATE {table} SET checksum = ? WHERE {id_col} = ?"
-                tx_run(conn, update_query, (new_checksum, row_id), fetch=False)
+                tx_run(active_conn, update_query, (new_checksum, row_id), fetch=False)
                 prev_checksum = new_checksum
+
+    if conn is not None:
+        _rebuild(conn)
+        return
+
+    from backend.database import transaction
+    with transaction() as owned_conn:
+        _rebuild(owned_conn)

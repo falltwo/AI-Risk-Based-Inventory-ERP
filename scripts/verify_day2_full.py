@@ -56,7 +56,7 @@ def main():
     # 測試 2: 核准操作
     # -------------------------------------------------------------
     print(f"\n[測試 2] 呼叫 approve_action({approval_id1})...")
-    app_res = approve_action(approval_id1)
+    app_res = approve_action(approval_id1, approver="admin")
     print(f"核准結果: {app_res}")
     assert app_res["status"] == "ok", "Error: approve_action failed!"
     
@@ -78,7 +78,7 @@ def main():
     # 呼叫拒絕，寫入原因
     reject_reason = "不符當前採購預算"
     print(f"呼叫 reject_action({approval_id2}, '{reject_reason}')...")
-    rej_res = reject_action(approval_id2, reason=reject_reason)
+    rej_res = reject_action(approval_id2, reason=reject_reason, approver="admin")
     print(f"拒絕結果: {rej_res}")
     assert rej_res["status"] == "denied", "Error: reject_action failed!"
     

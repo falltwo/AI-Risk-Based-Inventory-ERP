@@ -398,10 +398,23 @@ def _agent_tools(agent_id: str) -> list:
     return out
 
 
-def execute_tool_call(tool_name: str, args: dict, role: str, agent_id: str = "") -> dict:
+def execute_tool_call(
+    tool_name: str,
+    args: dict,
+    role: str,
+    agent_id: str = "",
+    *,
+    operation_id: str | None = None,
+) -> dict:
     """經 A 的 Tool Gateway 執行單一工具呼叫（治理鏈在此）。可離線測。
     F1：agent_id 會傳入 gateway.call(agent_name=)，讓 Agent 白名單檢查真正生效。"""
-    res = gateway.call(tool_name, args or {}, role, agent_name=agent_id)
+    res = gateway.call(
+        tool_name,
+        args or {},
+        role,
+        agent_name=agent_id,
+        operation_id=operation_id,
+    )
     if res.status == "ok":
         return {"status": "ok", "result": res.data}
     if res.status == "pending":
@@ -458,7 +471,13 @@ def run_agent(agent_id: str, task: str, role: str,
                 args = json.loads(tc.function.arguments or "{}")
             except Exception:
                 args = {}
-            outcome = execute_tool_call(tc.function.name, args, role, agent_id=agent_id)
+            outcome = execute_tool_call(
+                tc.function.name,
+                args,
+                role,
+                agent_id=agent_id,
+                operation_id=f"agent:{tc.id}",
+            )
             tool_calls_made.append({"tool": tc.function.name, "args": args,
                                     "outcome": outcome["status"]})
             if outcome["status"] == "pending":

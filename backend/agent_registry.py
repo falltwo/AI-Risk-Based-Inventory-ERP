@@ -53,7 +53,7 @@ AGENTS: dict[str, dict] = {
         "name_zh": "採購 Agent",
         "name_en": "ProcurementAgent",
         "modules": ["procurement"],
-        "can_write": False,                      # 目前採購工具皆 read_only
+        "can_write": True,                       # create_purchase_order 為 write，須審批
         "description": "負責供應商名單、採購單摘要、應付帳款查詢，"
                        "以及與庫存 Agent 協作的補貨採購情境。",
         "keywords": [
@@ -153,6 +153,7 @@ _FALLBACK_TOOLS: dict[str, list[str]] = {
     ],
     "procurement_agent": [
         "get_payables", "get_suppliers_list", "get_purchase_orders_summary",
+        "create_purchase_order", "sync_external_purchase_order",
     ],
     "sales_agent": [
         "get_recent_orders", "create_order", "get_receivables",

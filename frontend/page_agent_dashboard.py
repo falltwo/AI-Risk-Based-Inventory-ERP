@@ -7,6 +7,7 @@ frontend/page_agent_dashboard.py
 import streamlit as st
 import pandas as pd
 import json
+import os
 from datetime import datetime
 from backend.agent_registry import AGENTS, get_tools_for_agent, get_agent_for_tool
 from backend.agent_logger import (
@@ -18,6 +19,29 @@ from backend.agent_logger import (
     write_action_log,
 )
 from backend.database import run_query
+
+
+def _history_action_kind(status: str, tool_name: str, role: str) -> str:
+    """判斷審批歷程卡片可提供的後續動作。"""
+    if status == "rejected":
+        return "rejected"
+    if status != "approved":
+        return "none"
+    if tool_name not in ("update_inventory", "create_order"):
+        return "not_rollbackable"
+    if role != "admin":
+        return "admin_required"
+    return "rollback"
+
+
+def _demo_seed_enabled() -> bool:
+    """示範資料只能由環境變數明確啟用，避免污染真實治理指標。"""
+    return os.getenv("ERP_ENABLE_DEMO_SEED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def format_parameters_to_chinese(tool_name: str, args) -> str:
@@ -61,6 +85,21 @@ def format_parameters_to_chinese(tool_name: str, args) -> str:
         if qty is not None:
             return f"{pid} 銷售 {qty} 件{cust_str}"
         return f"商品 ID: {pid}{cust_str}"
+
+    elif tool_name == "create_purchase_order":
+        po_id = args.get("po_id", "")
+        supplier_id = args.get("supplier_id", "")
+        product_id = args.get("product_id", "")
+        qty = args.get("qty", "")
+        unit_price = args.get("unit_price")
+        try:
+            price_text = f"｜單價 NT${float(unit_price):,.2f}"
+        except (TypeError, ValueError):
+            price_text = f"｜單價 {unit_price}" if unit_price not in (None, "") else ""
+        return (
+            f"採購單 {po_id}｜供應商 {supplier_id}｜"
+            f"商品 {product_id} × {qty}{price_text}"
+        )
         
     # 其他工具的參數 key 對照表
     key_mapping = {
@@ -87,8 +126,9 @@ def render():
     st.markdown("<div class='premium-title'>🕵️ Agent Dashboard</div>", unsafe_allow_html=True)
     st.markdown("<p style='color: #64748b; font-size: 1.1rem; margin-bottom: 2rem;'>即時監控專責 AI Agent 的運行狀態、總管派工決策、工具呼叫記錄與敏感操作的審批管理。</p>", unsafe_allow_html=True)
 
-    # ── 自動初始化示範用之派工紀錄與審批資料 (初次載入無資料時) ─────────────────
-    _initialize_demo_data_if_empty()
+    # 示範資料必須明確 opt-in，正常運行不得自動寫入假紀錄。
+    if _demo_seed_enabled():
+        _initialize_demo_data_if_empty()
 
     # ── 從資料庫取得最新審批資料 ──────────────────────────────
     pending_list = get_pending_list()
@@ -110,7 +150,8 @@ def render():
                 "role": app["requester"],
                 "status": app["status"],
                 "reason": app["reason"] or "",
-                "processed_time": app["updated_at"]
+                "processed_time": app["updated_at"],
+                "operation_id": app.get("operation_id"),
             })
 
     # ── 頂部 Metrics 卡片 ───────────────────────────────────────────────
@@ -184,6 +225,8 @@ def render():
                     with col_item1:
                         st.markdown(f"##### 📋 申請單號：`{item['id']}`")
                         st.caption(f"🕒 請求時間：{item['time']} | 👤 申請者角色：`{item['role']}`")
+                        if item.get("operation_id"):
+                            st.caption(f"🔗 操作識別碼：`{item['operation_id']}`")
 
                         # 呈現詳情
                         st.markdown(f"**觸發 Agent**: `{item['agent']}` ({AGENTS.get(item['agent'], {}).get('name_zh', '未知')})")
@@ -196,6 +239,7 @@ def render():
                         st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
                         # 檢查目前登入角色是否為 admin
                         current_role = st.session_state.get("role", "guest")
+                        current_username = st.session_state.get("username", "")
 
                         if current_role == "admin":
                             # 輸入拒絕原因的文字框
@@ -206,7 +250,9 @@ def render():
                             with btn_col1:
                                 if st.button("✅ 核准", key=f"appr_{item['id']}", use_container_width=True):
                                     # 呼叫後端核准
-                                    res = approve_action(item['id'])
+                                    res = approve_action(
+                                        item['id'], approver=current_username
+                                    )
                                     if res.get("status") == "ok" or res.get("status") == "pending":
                                         st.toast(f"已成功核准單號 {item['id']}！")
                                     else:
@@ -218,8 +264,15 @@ def render():
                                         st.warning("請先填寫拒絕原因！")
                                     else:
                                         # 呼叫後端拒絕，傳入原因
-                                        reject_action(item['id'], rej_reason)
-                                        st.toast(f"已拒絕單號 {item['id']} 調用請求。")
+                                        res = reject_action(
+                                            item['id'],
+                                            rej_reason,
+                                            approver=current_username,
+                                        )
+                                        if res.get("status") == "denied":
+                                            st.toast(f"已拒絕單號 {item['id']} 調用請求。")
+                                        else:
+                                            st.error(f"拒絕失敗：{res.get('message')}")
                                         st.rerun()
                         else:
                             st.info("🔒 唯讀：需登入管理員 (admin) 帳號進行審批")
@@ -239,13 +292,17 @@ def render():
                             reason_msg = f" | 原因: `{item['reason']}`" if item["reason"] else ""
                             st.markdown(f"**單號**: `{item['id']}` ({status_emoji} {status_zh}{reason_msg})")
                             st.caption(f"🕒 請求時間：{item['time']} | 處理時間：{item['processed_time']} | 申請人：`{item['role']}`")
+                            if item.get("operation_id"):
+                                st.caption(f"🔗 操作識別碼：`{item['operation_id']}`")
                             readable_args = format_parameters_to_chinese(item['tool'], item['raw_args'])
                             st.markdown(f"**調用工具**: `{item['tool']}` | **參數**: `{readable_args}`")
 
                         with col_hist_act:
                             st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
-                            can_rollback = item["status"] == "approved" and item["tool"] in ("update_inventory", "create_order")
-                            if current_role == "admin" and can_rollback:
+                            history_action = _history_action_kind(
+                                item["status"], item["tool"], current_role
+                            )
+                            if history_action == "rollback":
                                 # 沖銷（補償交易）：走 Gateway 執行、寫入 action log 供稽核。
                                 # 不再把單號重置回 pending —— 沖銷本身已核准人一次確認，
                                 # 不需要再進一次審批單讓同一位管理員自己審自己。
@@ -291,9 +348,11 @@ def render():
                                     else:
                                         st.error(msg or "沖銷未執行：缺少必要參數。")
                                     st.rerun()
-                            elif current_role != "admin":
+                            elif history_action == "admin_required":
                                 st.caption("🔒 僅管理員可沖銷")
-                            else:
+                            elif history_action == "not_rollbackable":
+                                st.caption("（此操作不支援沖銷）")
+                            elif history_action == "rejected":
                                 st.caption("（已拒絕，無需沖銷）")
 
         st.markdown("---")
@@ -373,7 +432,7 @@ def render():
 
     with tab_metrics:
         st.markdown("### 🛡️ AI 治理觀測指標 (Governance Observability)")
-        st.markdown("觀察 AI 代理的送審比例、流程延遲、紀錄關聯與工具負載；這些數值不等同治理有效性證明。")
+        st.markdown("觀察審批請求、AI 代理流程延遲、紀錄關聯與工具負載；這些數值不等同治理有效性證明。")
         
         # 讀取 4 個 SQLite View
         import sqlite3
@@ -382,8 +441,8 @@ def render():
             dt_row = run_query("SELECT avg_decision_time FROM view_decision_time")
             avg_dt = dt_row[0][0] if dt_row else None
             
-            ratio_row = run_query("SELECT intercept_ratio FROM view_pending_intercept_ratio")
-            intercept_r = ratio_row[0][0] if ratio_row else None
+            approval_row = run_query("SELECT total_requests FROM view_approval_summary")
+            approval_count = approval_row[0][0] if approval_row else None
             
             trace_row = run_query("SELECT traceability_rate FROM view_traceability_rate")
             trace_r = trace_row[0][0] if trace_row else None
@@ -392,28 +451,27 @@ def render():
             avg_tools = tools_row[0][0] if tools_row else None
         except Exception as e:
             st.error(f"讀取治理指標失敗: {e}")
-            avg_dt = intercept_r = trace_r = avg_tools = None
+            avg_dt = approval_count = trace_r = avg_tools = None
             
         m_col1, m_col2, m_col3, m_col4 = st.columns(4)
         m_col1.metric("⏱️ 平均決策時間", "資料不足" if avg_dt is None else f"{avg_dt:.2f} 秒", help="總管派工至底層工具執行的平均時間差")
-        m_col2.metric("🛡️ pending 送審比例", "資料不足" if intercept_r is None else f"{intercept_r * 100:.1f}%", help="需人工審批的敏感寫入操作佔總任務之比例；不是攻擊攔截成功率")
+        m_col2.metric("🛡️ 審批請求數", "資料不足" if approval_count is None else f"{approval_count:,} 筆", help="所有入口寫入審批帳本的請求總數；不是攻擊攔截數")
         m_col3.metric("🔗 紀錄關聯率", "資料不足" if trace_r is None else f"{trace_r * 100:.1f}%", help="可由 caller 與 120 秒時間窗找到可能上游派工的工具執行比例")
         m_col4.metric("⚙️ 平均帶工具數", "資料不足" if avg_tools is None else f"{avg_tools:.2f} 個", help="每次派工任務中平均呼叫的工具次數")
         
         st.markdown("---")
-        st.markdown("### 📈 派工與攔截趨勢")
+        st.markdown("### 📈 派工與審批趨勢")
         
         # 繪製趨勢折線圖
         try:
             df_trend = pd.read_sql_query(
                 """
-                SELECT 
-                  substr(timestamp, 1, 10) AS 日期,
-                  COUNT(*) AS 總派工數,
-                  SUM(needs_approval) AS 攔截審批數
-                FROM agent_dispatch_logs
-                GROUP BY 日期
-                ORDER BY 日期 ASC
+                SELECT
+                  date AS 日期,
+                  total_dispatches AS 總派工數,
+                  approval_requests AS 審批請求數
+                FROM view_governance_daily_trend
+                ORDER BY date ASC
                 """,
                 sqlite3.connect(DB_FILE)
             )
@@ -421,7 +479,7 @@ def render():
                 df_trend = df_trend.set_index("日期")
                 st.line_chart(df_trend, color=["#3B82F6", "#EF4444"])
             else:
-                st.info("💡 尚無派工趨勢資料。請先與 AI 助理進行對話以產生統計數據。")
+                st.info("💡 尚無派工或審批趨勢資料。")
         except Exception as e:
             st.error(f"無法載入趨勢圖表: {e}")
         st.markdown("<br><br>", unsafe_allow_html=True)

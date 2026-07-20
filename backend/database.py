@@ -55,10 +55,36 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS stock_moves (move_id INTEGER PRIMARY KEY AUTOINCREMENT, product_id TEXT, warehouse_id TEXT, qty INTEGER, move_type TEXT, ref_no TEXT, move_date TEXT, note TEXT)''')
     # 採購：供應商、採購單
     c.execute('''CREATE TABLE IF NOT EXISTS suppliers (supplier_id TEXT PRIMARY KEY, name TEXT, contact TEXT, phone TEXT, email TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS purchase_orders (po_id TEXT PRIMARY KEY, supplier_id TEXT, order_date TEXT, status TEXT, total_amount REAL, note TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS purchase_orders (
+        po_id TEXT PRIMARY KEY,
+        supplier_id TEXT,
+        order_date TEXT,
+        status TEXT,
+        total_amount REAL,
+        note TEXT,
+        operation_id TEXT,
+        last_sync_operation_id TEXT,
+        external_source_system TEXT,
+        external_id TEXT,
+        external_version INTEGER,
+        estimated_delay_days INTEGER,
+        alternative_suggestion TEXT
+    )''')
     c.execute('''CREATE TABLE IF NOT EXISTS purchase_order_items (id INTEGER PRIMARY KEY AUTOINCREMENT, po_id TEXT, product_id TEXT, qty INTEGER, unit_price REAL)''')
     # 銷售：客戶、報價單、銷售單、收款
-    c.execute('''CREATE TABLE IF NOT EXISTS customers (customer_id TEXT PRIMARY KEY, name TEXT, contact TEXT, phone TEXT, email TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS customers (
+        customer_id TEXT PRIMARY KEY,
+        name TEXT,
+        company TEXT,
+        contact TEXT,
+        phone TEXT,
+        email TEXT,
+        country TEXT,
+        region TEXT,
+        latitude REAL,
+        longitude REAL,
+        risk_level TEXT
+    )''')
     c.execute('''CREATE TABLE IF NOT EXISTS quotations (quote_id TEXT PRIMARY KEY, customer_id TEXT, quote_date TEXT, status TEXT, total_amount REAL, valid_until TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS quotation_items (id INTEGER PRIMARY KEY AUTOINCREMENT, quote_id TEXT, product_id TEXT, qty INTEGER, unit_price REAL)''')
     c.execute('''CREATE TABLE IF NOT EXISTS orders (order_id TEXT PRIMARY KEY, customer_id TEXT, product_id TEXT, quantity INTEGER, status TEXT, order_date TEXT, total_amount REAL)''')
@@ -78,6 +104,15 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS carbon_factors (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id TEXT, scope INTEGER, kg_co2_per_unit REAL, note TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS supply_chain_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT, region TEXT, country TEXT, impact_days INTEGER, description TEXT, created_at TEXT, news_id INTEGER)''')
     c.execute('''CREATE TABLE IF NOT EXISTS supply_chain_news (id INTEGER PRIMARY KEY AUTOINCREMENT, country TEXT, region TEXT, title TEXT, summary TEXT, url TEXT, source TEXT, published_at TEXT, relevance_tag TEXT, fetched_at TEXT, category TEXT, is_relevant INTEGER DEFAULT 1, estimated_delay INTEGER)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS risk_heatmap (
+        region_key TEXT PRIMARY KEY,
+        display_name TEXT,
+        latitude REAL,
+        longitude REAL,
+        risk_pct REAL,
+        ai_summary TEXT,
+        updated_at TEXT
+    )''')
     c.execute('''CREATE TABLE IF NOT EXISTS esg_targets (id INTEGER PRIMARY KEY AUTOINCREMENT, target_year INTEGER, scope INTEGER, baseline_kg_co2 REAL, target_kg_co2 REAL, note TEXT)''')
     # 永續 ESG：風險管理係數（地區/事件類型/供應商類別 → 風險分數 0–100、權重）
     c.execute('''CREATE TABLE IF NOT EXISTS esg_risk_factors (id INTEGER PRIMARY KEY AUTOINCREMENT, risk_type TEXT, risk_key TEXT, risk_score REAL, weight REAL, note TEXT, updated_at TEXT, UNIQUE(risk_type, risk_key))''')
@@ -113,8 +148,94 @@ def init_db():
         created_at TEXT,
         updated_at TEXT,
         reason TEXT,
-        checksum TEXT
+        checksum TEXT,
+        operation_id TEXT,
+        payload_digest TEXT,
+        resource_version TEXT,
+        policy_version TEXT,
+        version INTEGER NOT NULL DEFAULT 0
     )''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS effect_receipts (
+        receipt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        operation_id TEXT NOT NULL UNIQUE,
+        approval_id TEXT NOT NULL UNIQUE,
+        payload_digest TEXT NOT NULL,
+        result TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )''')
+
+    # L3 ERP CSV exchange: validated staging is kept separate from live PO data.
+    # A stable (source_system, external_id) identifies one external record while
+    # version/content_digest identify the exact revision submitted for approval.
+    c.execute('''CREATE TABLE IF NOT EXISTS erp_exchange_records (
+        source_system TEXT NOT NULL,
+        external_id TEXT NOT NULL,
+        po_id TEXT NOT NULL,
+        supplier_id TEXT NOT NULL,
+        product_id TEXT NOT NULL,
+        qty INTEGER NOT NULL,
+        unit_price REAL NOT NULL,
+        order_date TEXT NOT NULL,
+        status TEXT NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        content_digest TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        last_synced_version INTEGER,
+        last_synced_operation_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (source_system, external_id),
+        UNIQUE (source_system, po_id)
+    )''')
+
+    # External acknowledgements are distinct from effect_receipts. The latter
+    # proves the local SQLite effect; this table proves a returned ERP receipt
+    # matched the exact approved operation and payload.
+    c.execute('''CREATE TABLE IF NOT EXISTS erp_exchange_receipts (
+        operation_id TEXT PRIMARY KEY,
+        source_system TEXT NOT NULL,
+        external_id TEXT NOT NULL,
+        approval_id TEXT NOT NULL,
+        payload_digest TEXT NOT NULL,
+        receipt_attempt_id TEXT,
+        receipt_status TEXT NOT NULL,
+        message TEXT NOT NULL DEFAULT '',
+        key_id TEXT,
+        signature TEXT,
+        received_by TEXT NOT NULL,
+        received_at TEXT NOT NULL
+    )''')
+
+    for column_name, column_type in (
+        ("receipt_attempt_id", "TEXT"),
+        ("key_id", "TEXT"),
+        ("signature", "TEXT"),
+        ("received_by", "TEXT"),
+    ):
+        try:
+            c.execute(
+                f"ALTER TABLE erp_exchange_receipts ADD COLUMN {column_name} {column_type}"
+            )
+        except sqlite3.OperationalError:
+            pass
+
+    c.execute('''CREATE TABLE IF NOT EXISTS erp_exchange_receipt_events (
+        receipt_attempt_id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL,
+        source_system TEXT NOT NULL,
+        external_id TEXT NOT NULL,
+        approval_id TEXT NOT NULL,
+        payload_digest TEXT NOT NULL,
+        receipt_status TEXT NOT NULL,
+        message TEXT NOT NULL DEFAULT '',
+        key_id TEXT NOT NULL,
+        signature TEXT NOT NULL,
+        received_by TEXT NOT NULL,
+        received_at TEXT NOT NULL
+    )''')
+    c.execute('''CREATE INDEX IF NOT EXISTS ix_erp_exchange_receipt_events_operation
+        ON erp_exchange_receipt_events(operation_id, received_at)''')
 
     # 確保待審批表包含 reason 欄位
     try:
@@ -131,6 +252,54 @@ def init_db():
         c.execute("ALTER TABLE pending_approvals ADD COLUMN checksum TEXT")
     except sqlite3.OperationalError:
         pass
+
+    # A′：舊資料庫的審批列保留不動；新增欄位允許 NULL，只有新版操作受唯一鍵保護。
+    pending_approval_migrations = (
+        ("operation_id", "TEXT"),
+        ("payload_digest", "TEXT"),
+        ("resource_version", "TEXT"),
+        ("policy_version", "TEXT"),
+        ("version", "INTEGER NOT NULL DEFAULT 0"),
+    )
+    for column_name, column_type in pending_approval_migrations:
+        try:
+            c.execute(
+                f"ALTER TABLE pending_approvals ADD COLUMN {column_name} {column_type}"
+            )
+        except sqlite3.OperationalError:
+            pass
+
+    c.execute('''CREATE UNIQUE INDEX IF NOT EXISTS uq_pending_approvals_operation_id
+        ON pending_approvals(operation_id)
+        WHERE operation_id IS NOT NULL''')
+
+    # A′：新建的採購單與核准 operation 建立一對一連結。
+    # 舊資料保留 NULL，因此可以無損升級且不會被誤綁定。
+    try:
+        c.execute("ALTER TABLE purchase_orders ADD COLUMN operation_id TEXT")
+    except sqlite3.OperationalError:
+        pass
+    c.execute('''CREATE UNIQUE INDEX IF NOT EXISTS uq_purchase_orders_operation_id
+        ON purchase_orders(operation_id)
+        WHERE operation_id IS NOT NULL''')
+
+    for column_name, column_type in (
+        ("last_sync_operation_id", "TEXT"),
+        ("external_source_system", "TEXT"),
+        ("external_id", "TEXT"),
+        ("external_version", "INTEGER"),
+        ("estimated_delay_days", "INTEGER"),
+        ("alternative_suggestion", "TEXT"),
+    ):
+        try:
+            c.execute(
+                f"ALTER TABLE purchase_orders ADD COLUMN {column_name} {column_type}"
+            )
+        except sqlite3.OperationalError:
+            pass
+    c.execute('''CREATE UNIQUE INDEX IF NOT EXISTS uq_purchase_orders_external_record
+        ON purchase_orders(external_source_system, external_id)
+        WHERE external_source_system IS NOT NULL AND external_id IS NOT NULL''')
 
     # F7：確保派工紀錄表存在（agent_dispatch_logs 原由 dispatch_logger 動態建，
     # 這裡預建讓 init_db 後 4 大治理效益 view 立即可用）
@@ -186,6 +355,41 @@ def init_db():
     LEFT JOIN agent_action_logs a ON a.caller = d.caller
       AND strftime('%s', a.timestamp) >= strftime('%s', d.timestamp)
       AND strftime('%s', a.timestamp) - strftime('%s', d.timestamp) <= 120''')
+
+    # 所有入口最終都會寫入審批帳本；不以 Agent 派工紀錄代替審批事實。
+    c.execute("DROP VIEW IF EXISTS view_approval_summary")
+    c.execute('''CREATE VIEW view_approval_summary AS
+    SELECT
+      COUNT(*) AS total_requests,
+      SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_requests,
+      SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved_requests,
+      SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected_requests
+    FROM pending_approvals''')
+
+    c.execute("DROP VIEW IF EXISTS view_governance_daily_trend")
+    c.execute('''CREATE VIEW view_governance_daily_trend AS
+    SELECT
+      activity_date AS date,
+      SUM(total_dispatches) AS total_dispatches,
+      SUM(approval_requests) AS approval_requests
+    FROM (
+      SELECT
+        substr(timestamp, 1, 10) AS activity_date,
+        COUNT(*) AS total_dispatches,
+        0 AS approval_requests
+      FROM agent_dispatch_logs
+      WHERE timestamp IS NOT NULL AND length(timestamp) >= 10
+      GROUP BY activity_date
+      UNION ALL
+      SELECT
+        substr(created_at, 1, 10) AS activity_date,
+        0 AS total_dispatches,
+        COUNT(*) AS approval_requests
+      FROM pending_approvals
+      WHERE created_at IS NOT NULL AND length(created_at) >= 10
+      GROUP BY activity_date
+    )
+    GROUP BY activity_date''')
 
     # 供應商擴充：地理位置與風險（供應鏈地圖、ESG）
     try:
@@ -246,6 +450,18 @@ def init_db():
             c.execute("ALTER TABLE customers ADD COLUMN phone TEXT")
         if 'email' not in columns:
             c.execute("ALTER TABLE customers ADD COLUMN email TEXT")
+        if 'company' not in columns:
+            c.execute("ALTER TABLE customers ADD COLUMN company TEXT")
+        if 'country' not in columns:
+            c.execute("ALTER TABLE customers ADD COLUMN country TEXT")
+        if 'region' not in columns:
+            c.execute("ALTER TABLE customers ADD COLUMN region TEXT")
+        if 'latitude' not in columns:
+            c.execute("ALTER TABLE customers ADD COLUMN latitude REAL")
+        if 'longitude' not in columns:
+            c.execute("ALTER TABLE customers ADD COLUMN longitude REAL")
+        if 'risk_level' not in columns:
+            c.execute("ALTER TABLE customers ADD COLUMN risk_level TEXT")
     except sqlite3.OperationalError:
         pass
 
@@ -279,10 +495,14 @@ def init_db():
             c.execute("INSERT OR IGNORE INTO inventory (product_id, name, stock, price, cost, reorder_point, daily_sales, barcode, warehouse_id) VALUES (?,?,?,?,?,?,?,?,?)",
                       (row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8]))
 
-        c.execute("INSERT OR IGNORE INTO suppliers (supplier_id, name, contact, phone, email) VALUES ('SUP01', '鍵鼠供應商', '張先生', '02-12345678', 'sup@example.com')")
-        c.execute("INSERT OR IGNORE INTO suppliers (supplier_id, name, contact, phone, email) VALUES ('SUP02', '螢幕原廠', '李小姐', '03-87654321', 'lcd@example.com')")
-        c.execute("INSERT OR IGNORE INTO customers VALUES ('C001', '科技公司A', '王經理', '02-11112222', 'a@example.com')")
-        c.execute("INSERT OR IGNORE INTO customers VALUES ('C002', '零售通路B', '陳主任', '02-33334444', 'b@example.com')")
+        c.execute("INSERT OR IGNORE INTO suppliers (supplier_id, name, contact, phone, email, is_official) VALUES ('SUP01', '鍵鼠供應商', '張先生', '02-12345678', 'sup@example.com', 1)")
+        c.execute("INSERT OR IGNORE INTO suppliers (supplier_id, name, contact, phone, email, is_official) VALUES ('SUP02', '螢幕原廠', '李小姐', '03-87654321', 'lcd@example.com', 1)")
+        c.execute("""INSERT OR IGNORE INTO customers
+            (customer_id, name, contact, phone, email)
+            VALUES ('C001', '科技公司A', '王經理', '02-11112222', 'a@example.com')""")
+        c.execute("""INSERT OR IGNORE INTO customers
+            (customer_id, name, contact, phone, email)
+            VALUES ('C002', '零售通路B', '陳主任', '02-33334444', 'b@example.com')""")
 
         hr_data = [
             ("E001", "王小明", "業務部", "資深業務", 45000),
@@ -399,13 +619,15 @@ from contextlib import contextmanager
 
 
 @contextmanager
-def transaction():
+def transaction(immediate: bool = False):
     """
     開啟一個交易邊界，讓「讀 prev_hash → 算 row_hash → 寫新列」在同一連線、
     同一 commit 內原子完成。任何中途例外都會自動 rollback。
     """
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=5.0)
+    conn.execute("PRAGMA busy_timeout = 5000")
     try:
+        conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
         yield conn
         conn.commit()
     except Exception:
