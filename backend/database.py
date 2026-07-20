@@ -73,6 +73,39 @@ def init_db():
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
     )''')
+    # PoC deployment boundary: one SQLite database belongs to one organization.
+    # Production deployments set ERP_ORGANIZATION_ID; the demo is demo-org.
+    deployment_org = os.environ.get("ERP_ORGANIZATION_ID", "").strip()
+    demo_mode = is_demo_mode_enabled()
+    if demo_mode and not deployment_org:
+        deployment_org = "demo-org"
+    existing_deployment = c.execute(
+        "SELECT value FROM app_metadata "
+        "WHERE key = 'deployment_organization_id'"
+    ).fetchone()
+    if (
+        not demo_mode
+        and not deployment_org
+        and existing_deployment is None
+        and c.execute("SELECT COUNT(*) FROM users").fetchone()[0] > 0
+    ):
+        conn.close()
+        raise RuntimeError(
+            "Existing non-demo database has no organization boundary. "
+            "Set ERP_ORGANIZATION_ID, then provision user_organizations and "
+            "organization_entitlements before starting the application."
+        )
+    if deployment_org:
+        if existing_deployment is not None and existing_deployment[0] != deployment_org:
+            conn.close()
+            raise RuntimeError(
+                "ERP_ORGANIZATION_ID does not match this database deployment"
+            )
+        c.execute(
+            "INSERT OR IGNORE INTO app_metadata (key, value) "
+            "VALUES ('deployment_organization_id', ?)",
+            (deployment_org,),
+        )
     # 進銷存：商品、倉庫
     c.execute('''CREATE TABLE IF NOT EXISTS warehouses (warehouse_id TEXT PRIMARY KEY, name TEXT, address TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS inventory (product_id TEXT PRIMARY KEY, name TEXT, stock INTEGER, price INTEGER, cost REAL, reorder_point INTEGER, baseline_reorder_point INTEGER, daily_sales INTEGER, barcode TEXT, warehouse_id TEXT)''')
@@ -187,6 +220,61 @@ def init_db():
         approval_id TEXT NOT NULL UNIQUE,
         payload_digest TEXT NOT NULL,
         result TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )''')
+
+    # L2 purchase proposals are independent business objects. They correlate
+    # with approval/execution through an adapter-derived operation ID, but do
+    # not own Gateway metadata, approval state, or an approval identifier.
+    c.execute('''CREATE TABLE IF NOT EXISTS purchase_proposals (
+        proposal_id TEXT PRIMARY KEY,
+        proposal_type TEXT NOT NULL,
+        schema_version INTEGER NOT NULL,
+        organization_id TEXT NOT NULL,
+        proposer_username TEXT NOT NULL,
+        proposer_role TEXT NOT NULL,
+        affected_po_id TEXT NOT NULL,
+        source_po_item_id INTEGER NOT NULL,
+        proposed_po_id TEXT NOT NULL UNIQUE,
+        original_supplier_id TEXT NOT NULL,
+        alternative_supplier_id TEXT NOT NULL,
+        alternative_supplier_product_id INTEGER NOT NULL,
+        product_id TEXT NOT NULL,
+        qty INTEGER NOT NULL,
+        unit_price REAL NOT NULL,
+        currency TEXT NOT NULL,
+        order_date TEXT NOT NULL,
+        proposed_status TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        estimated_delay_days INTEGER,
+        source_event_id INTEGER,
+        source_po_version TEXT NOT NULL,
+        proposal_digest TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )''')
+    c.execute('''CREATE INDEX IF NOT EXISTS ix_purchase_proposals_affected_po
+        ON purchase_proposals(affected_po_id, created_at)''')
+
+    # Unreleased Proposal v1 development databases may predate exact line/price
+    # identity. New rows always populate these columns; old incomplete rows fail
+    # closed during integrity validation rather than being guessed.
+    for column_name, column_type in (
+        ("source_po_item_id", "INTEGER"),
+        ("alternative_supplier_product_id", "INTEGER"),
+    ):
+        try:
+            c.execute(
+                f"ALTER TABLE purchase_proposals ADD COLUMN {column_name} {column_type}"
+            )
+        except sqlite3.OperationalError:
+            pass
+
+    # Business-effect claim: several proposals may be compared, but only one
+    # full replacement PO may commit for a given original PO line.
+    c.execute('''CREATE TABLE IF NOT EXISTS purchase_proposal_effects (
+        source_po_item_id INTEGER PRIMARY KEY,
+        proposal_id TEXT NOT NULL UNIQUE,
+        operation_id TEXT NOT NULL UNIQUE,
         created_at TEXT NOT NULL
     )''')
 

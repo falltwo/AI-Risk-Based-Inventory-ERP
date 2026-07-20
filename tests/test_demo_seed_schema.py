@@ -3,6 +3,8 @@
 import sqlite3
 from datetime import datetime
 
+import pytest
+
 from backend import database
 from scripts import seed_e_day1_demo_data
 
@@ -28,7 +30,81 @@ def test_fresh_database_has_every_column_required_by_demo_seeder(
         assert conn.execute(
             "SELECT COUNT(*) FROM supply_chain_events"
         ).fetchone()[0] >= 1
+        orphan_item_count = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM purchase_order_items item
+            LEFT JOIN inventory product
+              ON product.product_id = item.product_id
+            WHERE item.po_id = ? AND product.product_id IS NULL
+            """,
+            (seed_e_day1_demo_data.DEMO_PURCHASE_ORDER["po_id"],),
+        ).fetchone()[0]
+        assert orphan_item_count == 0
         conn.rollback()
+
+
+def test_demo_seed_preserves_source_line_identity_after_approval(
+    tmp_path, monkeypatch
+):
+    from backend.purchase_proposals import (
+        ApprovalDecision,
+        decide_purchase_proposal,
+        prepare_alternative_purchase_proposal,
+        submit_purchase_proposal,
+    )
+
+    db_path = tmp_path / "stable-demo-source.db"
+    monkeypatch.setattr(database, "DB_FILE", str(db_path))
+    database.init_db()
+    now = datetime.now()
+
+    with sqlite3.connect(db_path) as conn:
+        seed_e_day1_demo_data.seed_low_stock(conn)
+        seed_e_day1_demo_data.seed_suppliers(conn)
+        seed_e_day1_demo_data.seed_purchase_order(conn, now)
+        source_id = conn.execute(
+            "SELECT id FROM purchase_order_items "
+            "WHERE po_id = ? AND product_id = 'P019'",
+            (seed_e_day1_demo_data.DEMO_PURCHASE_ORDER["po_id"],),
+        ).fetchone()[0]
+
+    proposal = prepare_alternative_purchase_proposal(
+        proposal_id="PROP-SEED-STABLE-A",
+        affected_po_id=seed_e_day1_demo_data.DEMO_PURCHASE_ORDER["po_id"],
+        product_id="P019",
+        source_po_item_id=source_id,
+        alternative_supplier_id="SUP-E-DEMO-TW",
+        reason="Verify stable demo source identity",
+        actor="planner",
+    )
+    submit_purchase_proposal(proposal, actor="planner")
+    approved = decide_purchase_proposal(
+        ApprovalDecision(proposal_id=proposal.proposal_id, outcome="approve"),
+        actor="approver",
+    )
+    assert approved.status == "ok"
+
+    with sqlite3.connect(db_path) as conn:
+        seed_e_day1_demo_data.seed_purchase_order(conn, now)
+        replayed_source_id = conn.execute(
+            "SELECT id FROM purchase_order_items "
+            "WHERE po_id = ? AND product_id = 'P019'",
+            (seed_e_day1_demo_data.DEMO_PURCHASE_ORDER["po_id"],),
+        ).fetchone()[0]
+    assert replayed_source_id == source_id
+
+    second = prepare_alternative_purchase_proposal(
+        proposal_id="PROP-SEED-STABLE-B",
+        affected_po_id=seed_e_day1_demo_data.DEMO_PURCHASE_ORDER["po_id"],
+        product_id="P019",
+        source_po_item_id=source_id,
+        alternative_supplier_id="SUP-E-DEMO-TW",
+        reason="A second full replacement must remain blocked",
+        actor="planner",
+    )
+    with pytest.raises(PermissionError, match="已有另一份替代提案"):
+        submit_purchase_proposal(second, actor="planner")
 
 
 def test_init_db_additively_upgrades_old_demo_schema_without_data_loss(

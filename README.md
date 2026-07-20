@@ -1,199 +1,203 @@
 # AI-Risk-Based-Inventory-ERP
 
-![tests](https://github.com/falltwo/AI-Risk-Based-Inventory-ERP/actions/workflows/tests.yml/badge.svg)
+[繁體中文](README.md) | [English](README.en.md)
 
-**治理優先的 AI Agent 進銷存系統** —— 讓 AI 助理能實際操作 ERP（查庫存、開訂單、評估供應鏈風險），同時把每一個 AI 自主行動納入「可控、可審批、可稽核」的治理鏈。
+[![Tests](https://github.com/falltwo/AI-Risk-Based-Inventory-ERP/actions/workflows/tests.yml/badge.svg)](https://github.com/falltwo/AI-Risk-Based-Inventory-ERP/actions/workflows/tests.yml)
+[![Release](https://img.shields.io/github/v/release/falltwo/AI-Risk-Based-Inventory-ERP?display_name=tag)](https://github.com/falltwo/AI-Risk-Based-Inventory-ERP/releases)
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+![Streamlit](https://img.shields.io/badge/UI-Streamlit-FF4B4B?logo=streamlit&logoColor=white)
 
-## 這套系統解決什麼問題
+> **v1.0 — 可治理的供應鏈 AI 決策閉環**
+> AI 負責判斷與提案，人類保留執行權；受保護的 AI／Gateway 採購寫入可被審批、重放與追溯。
 
-企業導入 AI Agent 最大的顧慮不是能力，是控制：AI 建議可以參考，但讓 AI 直接改庫存、開訂單，誰來把關？出了問題怎麼追？
+本專案是一套治理優先的 AI Agent 進銷存系統。它把外部供應鏈風險、企業採購資料、AI 決策提案與 ERP 執行接成一條可驗證的流程，而不是只做聊天機器人或風險儀表板。
 
-本系統目前實作一條治理流程：
+> [!IMPORTANT]
+> 本版本是競賽與研究型 PoC。它採「一個 SQLite 資料庫對應一個組織」的部署邊界，尚未提供共享資料庫的多租戶隔離、外部 IAM/SSO 或跨系統分散式交易，因此不得直接當成公開網路服務的正式身分與授權系統。
 
-- Web／LINE Agent 路徑的工具呼叫都會經過 **Tool Gateway**；Web 另檢查 Agent 白名單，LINE 在模型前先縮減工具範圍
-- 會改動資料的操作一律**先攔截、送人工審批**，核准後才執行
-- 全程寫入**稽核紀錄**（派工決策、工具呼叫、審批流程三層）
-- 審批狀態由**程式層保留並揭露** —— 降低模型把 pending 說成 completed 的風險
+## v1.0 一眼看懂
 
-## 核心特性
+| 層級 | Demo 帳號 | 能做什麼 | 明確不能做什麼 |
+|---|---|---|---|
+| **L1 風險觀測** | `viewer / viewer` | 風險 KPI、熱圖、最新告警、唯讀 CSV 對映與通知預覽 | 不建立提案、不修改 ERP |
+| **L2 情報與決策** | `planner / planner` | 影響分析、What-if、替代供應商比較、建立不可變 Proposal 並送審 | 不核准、不直接執行 ERP 寫入 |
+| **L3 核准與執行** | `approver / approver` | 檢視核准證據、核准／拒絕、Gateway 執行、稽核時間線 | 不能核准自己的提案 |
 
-| 特性 | 說明 |
-|------|------|
-| 總管 Agent 派工 | 自然語言任務由 LLM 語意路由到專責 Agent，跨領域任務自動串接多個 Agent 並彙整 |
-| 8 個專責 Agent | 庫存、採購、銷售、財務、人資、ESG、供應鏈風險、客服 —— 各自僅持有職責內的工具白名單 |
-| Tool Gateway | 32 個登記工具的集中政策入口：檢查工具存在 → Agent 白名單 → 角色權限 → 工具政策分類；尚未以系統級方法證明不存在所有旁路 |
-| 四類工具 taxonomy | `read_only` / `suggestion` 直接執行；`write` / `dangerous` 攔截送審批。目前四類只形成兩種執行結果，`dangerous` 工具數為 0 |
-| 人工審批流程 | 待審批清單、核准 / 拒絕（附原因）、沖銷與重試，皆於 Dashboard 操作 |
-| 三層稽核紀錄 | 派工決策、工具呼叫與審批歷程；目前 requester 主要記錄角色，尚未完成個人層級職責分離 |
-| 審批狀態揭露 | 操作被攔下時，回覆由系統層強制附上審批單號與「尚未執行」告示，不依賴 LLM 自律 |
-| 多供應商容錯 | LLM 供應商掉線自動依序切換備援模型（LiteLLM，一行設定換模型） |
-| 供應鏈風險分析 | 外部新聞情資 → 風險熱圖 → 受影響採購單 → 替代建議 |
-| 雙入口 | Web（Streamlit）與 LINE Bot 最終共用 Gateway；LINE 另有來源專用 allowlist，兩個入口的前置控制並不完全相同 |
+### 完整決策鏈
+
+```mermaid
+flowchart LR
+    NEWS["外部風險情資"] --> L1["L1 Observe<br/>告警、熱圖、唯讀對映"]
+    L1 --> L2["L2 Recommend<br/>What-if、替代供應商"]
+    L2 --> PROP["Durable Proposal<br/>來源明細、價格、digest"]
+    PROP --> L3["L3 Approve / Reject<br/>人工決策"]
+    L3 --> GATE["Tool Gateway<br/>權限、CAS、交易、冪等"]
+    GATE --> ERP["ERP Effect<br/>採購單 + receipt + audit"]
+    L3 -. "未核准" .-> STOP["零 ERP 寫入"]
+```
+
+## v0.1 → v1.0
+
+v1.0 延續 v0.1 已完成的治理 harness，將它推進成可展示、可操作的供應鏈決策產品。
+
+| 面向 | v0.1 — Governance Harness Complete | v1.0 — Governed Decision Loop |
+|---|---|---|
+| 核心成果 | 關閉 Web、LINE、rollback 等治理旁路 | 將治理底座接成 L1→L2→L3 完整產品流程 |
+| AI 誠實性 | 由程式強制揭露 pending／denied，不依賴 prompt | Proposal、Approval、Execution 分離，畫面與資料庫狀態一致 |
+| 供應鏈體驗 | 情資、熱圖、受影響單據與建議各自存在 | 受影響採購明細可直接形成替代採購 Proposal |
+| 人工核准 | 通用寫入審批與可稽核狀態 | L3 顯示來源單據、供應商變更、數量、單價、理由與 digest |
+| 執行安全 | Gateway、hash-chain log、transaction baseline | exact line/price identity、即時撤權檢查、同來源明細唯一 effect、冪等 receipt |
+| 產品分層 | 角色與治理能力為主要重點 | 三個獨立帳號、三種可見功能與最小權限 |
+| 自動化測試 | 55 tests（v0.1 release） | **327 passing tests**（v1.0 release verification） |
+| 文件 | 中文 README 與架構圖 | 雙語 README、版本比較、誠實邊界與 v1.0 Release notes |
+
+v0.1 欄位根據維護者保留的封存 Release 紀錄整理；私有封存庫不列入公開文件連結。
+
+## 治理與安全設計
+
+- **伺服器端能力檢查**：角色、組織 membership 與 entitlement 每次從資料庫重新載入；缺值或撤權後一律 fail closed。
+- **職責分離**：L2 只能提案，L3 才能決策；同一帳號即使換角色也不能核准自己的提案。
+- **不可變核准證據**：canonical payload digest 覆蓋真正決定效果的欄位，並綁定來源採購明細、替代供應商價格與 operation ID。
+- **原子執行**：受保護採購單在同一 SQLite transaction 內完成 CAS 狀態轉移、ERP 寫入、business-effect claim、execution receipt 與終態。
+- **冪等重放**：相同 operation 重送時回傳既有 receipt，不會建立第二張採購單。
+- **端到端稽核**：L2 Proposal、L3 決策與 Gateway 執行以同一 operation ID 串接；公開畫面只顯示脫敏摘要。
+- **34 個受治理工具**：27 `read_only`、1 `suggestion`、6 `write`、0 `dangerous`；8 個專責 Agent 僅持有職責內白名單。
 
 ## 系統架構
 
-### GitHub 可渲染版
-
-**目前系統架構圖**
-
 ```mermaid
 flowchart TB
-    subgraph ENTRY["入口層"]
-        WEB["Streamlit Web<br/>ERP 功能頁、AI 助理、語音草稿"]
-        DASH["Agent Dashboard<br/>Agent 狀態、審批、派工與工具 log"]
-        LINE["LINE Bot<br/>FastAPI Webhook、低權限遠端查詢"]
-        RBAC["RBAC<br/>admin / warehouse / sales / hr"]
+    subgraph ENTRY["入口與身分"]
+        WEB["Streamlit Web"]
+        LINE["LINE Bot"]
+        WEB_ACCESS["Web: Role + Membership + Entitlement"]
+        LINE_ACCESS["LINE: source allowlist + role policy"]
     end
 
-    subgraph AI["AI 編排層"]
-        ORCH["總管 Agent<br/>LiteLLM 語意路由、關鍵字 fallback"]
-        AGENTS["8 個專責 Agent<br/>庫存、採購、銷售、財務、人資、ESG、供應鏈風險、客服"]
+    subgraph AI["AI 編排"]
+        ORCH["總管 Agent"]
+        AGENTS["8 個專責 Agent"]
     end
 
     subgraph GOV["治理層"]
-        GATE["Tool Gateway<br/>工具登記、Agent 白名單、角色權限、風險等級檢核"]
-        APPROVAL["審批控制<br/>write / dangerous 建立 pending approvals"]
-        SAFE["安全補強<br/>prompt 防注入、LINE 工具收斂、錯誤脫敏、密碼雜湊"]
+        REG["Tool Registry / Allowlist"]
+        GATE["Tool Gateway"]
+        APPROVAL["Proposal / Approval / Execution"]
     end
 
-    subgraph DATA["資料與稽核層"]
-        TOOLS["ERP 工具模組<br/>庫存、訂單、採購、財務、人資、製造、ESG、供應鏈風險"]
-        DB["SQLite 資料庫<br/>ERP_DB_PATH、init_db、使用者與營運資料表"]
-        LOGS["稽核紀錄<br/>agent_dispatch_logs、agent_action_logs、pending_approvals、llm_usage_logs"]
+    subgraph DATA["資料與證據"]
+        ERP["ERP Modules"]
+        DB["SQLite"]
+        AUDIT["Audit Logs + Receipts"]
     end
 
-    ENTRY --> AI --> GOV --> DATA
+    WEB --> WEB_ACCESS
+    LINE --> LINE_ACCESS
+    WEB_ACCESS --> ORCH
+    LINE_ACCESS --> ORCH
+    ORCH --> AGENTS --> REG --> GATE --> APPROVAL --> ERP --> DB
+    GATE --> AUDIT
+    APPROVAL --> AUDIT
 ```
 
-**AI 任務治理標準流程圖**
+治理宣稱的邊界是上圖中的受保護 AI／Gateway 採購流程。現有手動 Web ERP 表單另有角色權限控制，但並非每個手動寫入都會產生 Proposal、Approval 與 execution receipt。
 
-```mermaid
-flowchart TD
-    START["開始<br/>使用者提出 ERP 任務"] --> ROLE["任務入口與角色確認<br/>Web / Dashboard / LINE，取得 role"]
-    ROLE --> LINEQ{"來源是否為 LINE？"}
-    LINEQ -->|否| WEBROLE["使用登入角色權限<br/>admin / warehouse / sales / hr"]
-    LINEQ -->|是| LINELIMIT["套用 LINE 任務白名單<br/>僅開放低敏感、非寫入工具"]
-    WEBROLE --> ORCH["總管 Agent 判斷需求<br/>single / multi / smalltalk"]
-    LINELIMIT --> ORCH
-    ORCH --> DISPATCH["派工到專責 Agent<br/>寫入 agent_dispatch_logs"]
-    DISPATCH --> AGENT["專責 Agent 產生工具呼叫"]
-    AGENT --> GATE["Tool Gateway 檢核<br/>工具存在、Agent 白名單、角色權限、風險等級"]
-    GATE --> RISK{"風險等級"}
-    RISK -->|read_only / suggestion| EXEC["直接執行"]
-    RISK -->|write / dangerous| PENDING["建立 pending_approvals<br/>等待人工核准"]
-    PENDING --> APPROVE{"人工審批"}
-    APPROVE -->|核准| EXEC
-    APPROVE -->|拒絕| REJECT["拒絕並記錄原因"]
-    EXEC --> LOG["寫入 agent_action_logs<br/>必要時寫入業務資料"]
-    REJECT --> LOG
-    LOG --> RESP["回覆使用者<br/>揭露已執行或尚未執行狀態"]
-```
-
-### PNG 原圖
-
-**目前系統架構圖**
-
-<details>
-<summary>展開架構圖原始 PNG</summary>
-
-<p align="center">
-  <img src="docs/images/erp_current_clean_architecture.png" alt="AI 風險控管進銷存 ERP 系統架構圖" width="860">
-</p>
-
-[開啟架構圖原始大圖](docs/images/erp_current_clean_architecture.png)
-
-</details>
-
-**AI 任務治理標準流程圖**
-
-<details>
-<summary>展開流程圖原始 PNG</summary>
-
-<p align="center">
-  <img src="docs/images/erp_current_standard_flowchart.png" alt="目前 ERP 的 AI 任務治理流程圖" width="680">
-</p>
-
-[開啟流程圖原始大圖](docs/images/erp_current_standard_flowchart.png)
-
-</details>
-
-### 文字版
-
-```
-使用者（Web / LINE）
-      │  自然語言任務
-      ▼
-總管 Agent ─── 語意路由：判斷派給哪個專責 Agent（派工紀錄落庫）
-      ▼
-8 個專責 Agent ─── 各自僅能使用白名單內的工具
-      │  tool call
-      ▼
-Tool Gateway ─── 白名單 → 角色權限 → 風險分級（呼叫紀錄落庫）
-      ├── read_only / suggestion ──→ 直接執行
-      └── write / dangerous ──→ 待審批 ──→ 人工核准 ──→ 執行（審批歷程落庫）
-      ▼
-SQLite（業務資料 + 三層稽核紀錄）
-```
-
-**治理邊界**：治理鏈的對象是「AI Agent 的自主行動」。傳統的人工操作表單（手動開單、記帳、維護主檔）由登入者的角色權限（RBAC）管理，操作者本人即決策者，不重複進審批。
+原始架構圖：[系統架構 PNG](docs/images/erp_current_clean_architecture.png) · [治理流程 PNG](docs/images/erp_current_standard_flowchart.png)
 
 ## 快速開始
 
+### 1. 安裝
+
 ```bash
-# 1. 環境（Python 3.11+）
+git clone https://github.com/falltwo/AI-Risk-Based-Inventory-ERP.git
+cd AI-Risk-Based-Inventory-ERP
+
 python -m venv .venv
-.venv/Scripts/activate        # Windows；macOS/Linux 用 source .venv/bin/activate
+# Windows
+.venv\Scripts\activate
+# macOS / Linux
+# source .venv/bin/activate
+
 pip install -r requirements.txt
+```
 
-# 2. 設定模型（.env）
+### 2. 建立本機 Demo 設定
+
+```bash
 cp .env.example .env
-#    LLM_MODEL=gemini/gemini-2.5-flash   ← 填你的供應商/模型與對應金鑰
-#    本機比賽 Demo 才設定 ERP_DEMO_MODE=true（會建立並顯示已知測試帳密）
+```
 
-# 3. 啟動
+在 `.env` 至少設定：
+
+```dotenv
+ERP_DEMO_MODE=true
+LLM_MODEL=gemini/gemini-2.5-flash
+GEMINI_API_KEY=replace_with_your_key
+```
+
+### 3. 啟動
+
+```bash
 streamlit run app.py
 ```
 
-登入後左側選單進入「AI 智能助理」即可用自然語言操作；「Agent Dashboard」檢視派工、稽核與待審批。
+Demo 模式才會建立並顯示 `viewer`、`planner`、`approver` 等已知測試帳密。**只能在本機展示使用，不得開放至公網。**
 
-當且僅當 `.env` 明確設定 `ERP_DEMO_MODE=true` 時，系統才會建立並顯示測試帳號。此模式只供本機比賽展示，不得用於公開部署。
+## 重要設定
 
-若某個既有資料庫曾以 Demo 模式初始化，之後把旗標改回 `false` 不會自動刪除帳號；公開或正式部署前必須改用乾淨資料庫，或由管理者移除／輪替所有測試帳密。現階段的 L1/L2/L3 權限模型是單一組織、本機展示邊界，尚未提供多租戶資料列隔離或外部 IAM/SSO，不能直接當成網路服務的正式身分系統。
+| 環境變數 | 用途 | 預設／要求 |
+|---|---|---|
+| `ERP_DEMO_MODE` | 建立合成資料與 Demo 帳號 | `false`；僅限本機 |
+| `ERP_ORGANIZATION_ID` | 綁定此 SQLite DB 所屬組織 | Demo 自動使用 `demo-org`；既有非 Demo DB 必須設定後再配置 membership 與 entitlement |
+| `ERP_DB_PATH` | 自訂 SQLite 路徑 | `data/erp.db` |
+| `LLM_MODEL` | LiteLLM 主模型 | `gemini/gemini-2.5-flash` |
+| `LLM_FALLBACK_MODELS` | 逗號分隔的備援模型 | 見 `.env.example` |
+| `LLM_ANALYSIS_MODEL` | 新聞歸類／翻譯等副任務模型 | 未設時沿用主模型鏈 |
+| `GEMINI_API_KEY` / `OPENAI_API_KEY` | 對應模型供應商金鑰 | 依模型選擇 |
+| `GNEWS_API_KEY` | 供應鏈新聞來源 | 選用 |
+| `ERP_SCHEDULER_ACTOR` | 24 小時新聞刷新服務身分 | 未設定時停用 |
+| `LINE_CHANNEL_ACCESS_TOKEN` / `LINE_CHANNEL_SECRET` | LINE Bot | 選用 |
 
-### LINE Bot（選用）
-
-```bash
-# .env 需另設 LINE_CHANNEL_ACCESS_TOKEN / LINE_CHANNEL_SECRET / GEMINI_API_KEY
-python "line bot/bot_server.py"    # FastAPI 於 :8000，webhook 需公開網址（如 ngrok）
-```
-
-## 設定一覽
-
-| 環境變數 | 用途 | 預設 |
-|---------|------|------|
-| `ERP_DEMO_MODE` | 建立合成資料與已知 Demo 帳密；僅限本機展示 | `false` |
-| `ERP_SCHEDULER_ACTOR` | 背景新聞刷新使用的 ERP 服務身分；未設定時排程停用 | 未設定 |
-| `LINE_RICH_MENU_IMAGE_PATH` | 執行 LINE Rich Menu 設定腳本時使用的本機 PNG 路徑 | 未設定 |
-| `LLM_MODEL` | 主模型（LiteLLM 格式 `provider/model`），AI 助理與分析頁共用 | `gemini/gemini-2.5-flash` |
-| `LLM_FALLBACK_MODELS` | 備援模型（逗號分隔，主模型失敗時依序切換） | `openai/kimi-k2.6,gemini/gemini-2.5-flash` |
-| `LLM_ANALYSIS_MODEL` | 分析副任務別名（選填；新聞歸類/翻譯可指到較便宜模型） | 未設＝用主模型鏈 |
-| `OPENAI_API_KEY` / `OPENAI_API_BASE` | OpenAI 相容供應商的金鑰與端點 | — |
-| `GEMINI_API_KEY` | Gemini 金鑰（選 gemini 系模型時） | — |
-| `GNEWS_API_KEY` | 供應鏈新聞來源（選用） | — |
-| `ERP_DB_PATH` | 資料庫路徑（企業可指定既有 .db） | `data/erp.db` |
-| `LINE_CHANNEL_ACCESS_TOKEN` / `LINE_CHANNEL_SECRET` | LINE Bot 憑證（選用） | — |
-
-若一般（非採購／ERP 交換）寫入在效果完成後、執行收據落庫前中斷，審批會安全停在 `executing`，系統不會自動重試。處理方式見 [Generic approval reconciliation runbook](docs/generic_approval_reconciliation.md)。
-
-## 測試
+## 測試與驗證
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest tests/ -v
+python -m pytest -q
 ```
 
-測試涵蓋治理關鍵路徑：審批狀態揭露、彙整層治理訊號保留、供應商容錯切換。CI 於每個 PR 自動執行。
+v1.0 本機 release verification：**327 passed**。CI 會在每個 PR 自動執行。
 
-## 技術組成
+測試包含：
 
-Python 3.11 · Streamlit · SQLite · LiteLLM（多供應商模型層）· FastAPI + LINE Messaging API · Plotly
+- L1/L2/L3 導覽與伺服器端授權負向測試
+- 提案人自審、撤權後執行與跨組織拒絕
+- payload／resource version／來源明細／價格竄改拒絕
+- 併發核准、CAS、rollback 與 receipt 冪等重放
+- 同一來源採購明細只能產生一個完整替代 effect
+- Demo 種子資料不得產生孤兒採購品項，重播也不得改變已核准來源明細的識別碼
+
+## 專案結構
+
+```text
+backend/                     權限、Agent、Gateway、Proposal、ERP 與資料庫
+frontend/                    Streamlit 頁面與 L1/L2/L3 操作介面
+line bot/                    FastAPI + LINE Messaging API
+scripts/                     Demo 種子與維運工具
+tests/                       治理、授權、交易、UI contract 測試
+docs/                        架構圖、runbook 與 Release notes
+```
+
+## 已知限制
+
+- 一個 SQLite DB 只代表一個 organization；不是共享 DB 的 row-level multi-tenancy。
+- 應用層 audit 是 tamper-evident，但不能抵擋擁有主機／資料庫管理權限的人直接改檔。
+- SQLite 原子交易證據不能直接外推到外部 ERP API；跨系統執行仍需要 outbox／worker／對帳策略。
+- Demo 帳號與合成資料不應存在於正式部署；正式環境需另行配置身分、membership、entitlement 與秘密管理。
+- 從早期非 Demo 資料庫升級時，若尚未建立組織邊界，啟動會 fail fast；必須先設定 `ERP_ORGANIZATION_ID`，再配置 `user_organizations` 與 `organization_entitlements`。
+
+## 版本
+
+- [v1.0 Releases](https://github.com/falltwo/AI-Risk-Based-Inventory-ERP/releases)
+- [v1.0 English release notes](docs/releases/v1.0.md)
+
+技術組成：Python 3.11 · Streamlit · SQLite · LiteLLM · FastAPI · LINE Messaging API · Plotly

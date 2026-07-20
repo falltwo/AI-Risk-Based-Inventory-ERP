@@ -49,6 +49,28 @@ def test_known_demo_accounts_require_explicit_demo_mode(tmp_path, monkeypatch):
     assert check_login("admin", "admin") is None
 
 
+def test_existing_non_demo_database_without_organization_fails_fast(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "legacy-no-organization.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE users ("
+            "username TEXT PRIMARY KEY, password TEXT, role TEXT, name TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO users VALUES "
+            "('legacy-admin', 'legacy-hash', 'admin', 'Legacy Admin')"
+        )
+
+    monkeypatch.setattr(database, "DB_FILE", str(db_path))
+    monkeypatch.delenv("ERP_DEMO_MODE", raising=False)
+    monkeypatch.delenv("ERP_ORGANIZATION_ID", raising=False)
+
+    with pytest.raises(RuntimeError, match="ERP_ORGANIZATION_ID"):
+        database.init_db()
+
+
 def test_runtime_init_does_not_restore_revoked_access(tier_db):
     database.run_query(
         "DELETE FROM user_organizations WHERE username = 'planner'", fetch=False

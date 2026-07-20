@@ -13,6 +13,9 @@ DEFAULT_DB_PATH = ROOT_DIR / "data" / "erp.db"
 LOW_STOCK_PRODUCTS = [
     {
         "product_id": "P001",
+        "name": "筆記型電腦",
+        "price": 45000,
+        "cost": 35000,
         "stock": 12,
         "reorder_point": 60,
         "daily_sales": 8,
@@ -20,6 +23,9 @@ LOW_STOCK_PRODUCTS = [
     },
     {
         "product_id": "P004",
+        "name": "電腦螢幕",
+        "price": 6000,
+        "cost": 4500,
         "stock": 8,
         "reorder_point": 60,
         "daily_sales": 10,
@@ -27,6 +33,9 @@ LOW_STOCK_PRODUCTS = [
     },
     {
         "product_id": "P019",
+        "name": "USB-C 控制模組",
+        "price": 1200,
+        "cost": 690,
         "stock": 15,
         "reorder_point": 96,
         "daily_sales": 14,
@@ -173,19 +182,29 @@ def seed_low_stock(conn: sqlite3.Connection) -> None:
     for item in LOW_STOCK_PRODUCTS:
         conn.execute(
             """
-            UPDATE inventory
-               SET stock = ?,
-                   reorder_point = ?,
-                   daily_sales = ?,
-                   baseline_reorder_point = COALESCE(baseline_reorder_point, ?)
-             WHERE product_id = ?
+            INSERT INTO inventory (
+                product_id, name, stock, price, cost, reorder_point,
+                baseline_reorder_point, daily_sales, barcode
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(product_id) DO UPDATE SET
+                stock = excluded.stock,
+                reorder_point = excluded.reorder_point,
+                daily_sales = excluded.daily_sales,
+                baseline_reorder_point = COALESCE(
+                    inventory.baseline_reorder_point,
+                    excluded.baseline_reorder_point
+                )
             """,
             (
-                item["stock"],
-                item["reorder_point"],
-                item["daily_sales"],
-                item["baseline_reorder_point"],
                 item["product_id"],
+                item["name"],
+                item["stock"],
+                item["price"],
+                item["cost"],
+                item["reorder_point"],
+                item["baseline_reorder_point"],
+                item["daily_sales"],
+                f"E-DAY1-{item['product_id']}",
             ),
         )
 
@@ -309,15 +328,30 @@ def seed_purchase_order(conn: sqlite3.Connection, today: datetime) -> None:
         ),
     )
 
-    conn.execute("DELETE FROM purchase_order_items WHERE po_id = ?", (po["po_id"],))
     for item in po["items"]:
-        conn.execute(
-            """
-            INSERT INTO purchase_order_items (po_id, product_id, qty, unit_price)
-            VALUES (?, ?, ?, ?)
-            """,
-            (po["po_id"], item["product_id"], item["qty"], item["unit_price"]),
-        )
+        existing_items = conn.execute(
+            "SELECT id FROM purchase_order_items "
+            "WHERE po_id = ? AND product_id = ? ORDER BY id",
+            (po["po_id"], item["product_id"]),
+        ).fetchall()
+        if len(existing_items) > 1:
+            raise RuntimeError(
+                "Demo purchase order has duplicate product lines; "
+                "refusing to replace durable source evidence."
+            )
+        if existing_items:
+            conn.execute(
+                "UPDATE purchase_order_items SET qty = ?, unit_price = ? WHERE id = ?",
+                (item["qty"], item["unit_price"], existing_items[0][0]),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO purchase_order_items (po_id, product_id, qty, unit_price)
+                VALUES (?, ?, ?, ?)
+                """,
+                (po["po_id"], item["product_id"], item["qty"], item["unit_price"]),
+            )
 
 
 def seed_orders(conn: sqlite3.Connection, today: datetime) -> None:

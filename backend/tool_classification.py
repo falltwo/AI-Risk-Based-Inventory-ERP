@@ -125,7 +125,7 @@ TOOL_CLASSIFICATION = {
     "create_purchase_order": {
         "module": "procurement",
         "risk_level": "write",
-        "allowed_roles": ["admin", "warehouse"],
+        "allowed_roles": ["admin", "warehouse", "supply_planner"],
         "description": "建立採購單與明細，核准後才會寫入資料庫",
     },
     "sync_external_purchase_order": {

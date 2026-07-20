@@ -128,6 +128,12 @@ def load_principal(
         if row is None:
             return None
         organization_id = row[3]
+        deployment = active_conn.execute(
+            "SELECT value FROM app_metadata "
+            "WHERE key = 'deployment_organization_id'"
+        ).fetchone()
+        if deployment is None or deployment[0] != organization_id:
+            return None
         entitlement_rows = active_conn.execute(
             """
             SELECT entitlement_key

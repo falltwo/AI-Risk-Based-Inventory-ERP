@@ -20,6 +20,12 @@ from backend.agent_logger import (
     write_action_log,
 )
 from backend.database import run_query
+from backend.purchase_proposals import (
+    ApprovalDecision,
+    decide_purchase_proposal,
+    get_purchase_operation_timeline,
+    get_purchase_proposal_for_operation,
+)
 from frontend.access_navigation import dashboard_mode
 
 
@@ -35,6 +41,44 @@ def _filter_purchase_proposals(records):
         for item in records
         if item.get("tool", item.get("tool_name")) in _PURCHASE_PROPOSAL_TOOLS
     ]
+
+
+def _scope_purchase_records(records, principal):
+    """Remove cross-organization Proposal records before any detail is rendered."""
+    visible = []
+    for item in records:
+        operation_id = str(item.get("operation_id") or "")
+        if operation_id.startswith("proposal:create-po:"):
+            try:
+                proposal = get_purchase_proposal_for_operation(
+                    operation_id, actor=principal.username
+                )
+            except (PermissionError, ValueError):
+                continue
+            if proposal is None:
+                continue
+        visible.append(item)
+    return visible
+
+
+def _safe_purchase_proposal_decision(decision, *, actor: str) -> tuple[str, str]:
+    """Convert expected domain/authorization failures into renderable UI state."""
+    try:
+        result = decide_purchase_proposal(decision, actor=actor)
+    except (PermissionError, ValueError) as exc:
+        return "error", str(exc)
+    return result.status, result.message
+
+
+def _should_refresh_after_decision(outcome: str, status: str) -> bool:
+    """Keep failed decisions visible; refresh only after a terminal success."""
+    normalized_outcome = str(outcome or "").strip().lower()
+    normalized_status = str(status or "").strip().lower()
+    if normalized_outcome == "approve":
+        return normalized_status in {"ok", "pending"}
+    if normalized_outcome == "reject":
+        return normalized_status == "denied"
+    return False
 
 
 def _history_action_kind(status: str, tool_name: str, role: str) -> str:
@@ -138,6 +182,52 @@ def format_parameters_to_chinese(tool_name: str, args) -> str:
     return ", ".join(parts)
 
 
+def _render_domain_proposal_evidence(proposal) -> None:
+    """Show the immutable business evidence separately from approval state."""
+    st.markdown(f"**受影響採購單**：`{proposal.affected_po_id}`")
+    st.markdown(
+        f"**供應來源變更**：`{proposal.original_supplier_id}` → "
+        f"**替代供應商** `{proposal.alternative_supplier_id}`"
+    )
+    st.markdown(
+        f"**品項與條件**：`{proposal.product_id}` × {proposal.qty}｜"
+        f"單價 {proposal.currency} {proposal.unit_price:,.2f}｜"
+        f"預估延遲 {proposal.estimated_delay_days or 0} 天"
+    )
+    st.markdown(f"**L2 提案理由**：{proposal.reason}")
+    st.caption(
+        f"Proposal `{proposal.proposal_id}`｜schema v{proposal.schema_version}｜"
+        f"digest `{proposal.proposal_digest[:16]}…`"
+    )
+
+
+def _render_operation_timeline(operation_id: str, principal) -> None:
+    """Show a redacted operation timeline without raw payloads or secrets."""
+    try:
+        timeline = get_purchase_operation_timeline(
+            operation_id, actor=principal.username
+        )
+    except (PermissionError, ValueError) as exc:
+        st.error(f"無法驗證稽核時間線：{exc}")
+        return
+    if not timeline:
+        return
+    labels = {
+        "proposal_created": "L2 建立 Proposal",
+        "approval_submitted": "送交 L3 審批",
+        "approval_rejected": "L3 拒絕",
+        "execution_completed": "Gateway 執行完成",
+    }
+    with st.expander("🔎 端到端稽核時間線", expanded=False):
+        for event in timeline:
+            st.markdown(
+                f"- **{labels.get(event['kind'], event['kind'])}**｜"
+                f"{event.get('time') or '時間未記錄'}｜"
+                f"actor `{event.get('actor') or 'system'}`｜"
+                f"{event.get('summary') or ''}"
+            )
+
+
 def _render_purchase_approval_dashboard(principal, pending_list, approval_history):
     """Focused L3 surface: proposal evidence and decisions, without global logs."""
     st.markdown(
@@ -163,8 +253,22 @@ def _render_purchase_approval_dashboard(principal, pending_list, approval_histor
             st.markdown(
                 f"**核准證據**：`{format_parameters_to_chinese(item['tool'], item['args'])}`"
             )
+            domain_proposal = None
+            evidence_error = None
             if item.get("operation_id"):
                 st.caption(f"🔗 操作識別碼：`{item['operation_id']}`")
+                try:
+                    domain_proposal = get_purchase_proposal_for_operation(
+                        item["operation_id"], actor=principal.username
+                    )
+                except (PermissionError, ValueError) as exc:
+                    evidence_error = str(exc)
+            if evidence_error:
+                st.error(f"提案證據驗證失敗，已停止決策：{evidence_error}")
+                continue
+            if domain_proposal is not None:
+                _render_domain_proposal_evidence(domain_proposal)
+                _render_operation_timeline(item["operation_id"], principal)
 
             if item.get("requester_username") == principal.username:
                 st.warning("提案人不得核准自己的提案，請由另一位核准者處理。")
@@ -181,12 +285,25 @@ def _render_purchase_approval_dashboard(principal, pending_list, approval_histor
                     key=f"tier_approve_{item['id']}",
                     use_container_width=True,
                 ):
-                    result = approve_action(item["id"], approver=principal.username)
-                    if result.get("status") in {"ok", "pending"}:
-                        st.toast(f"提案 {item['id']} 已核准。")
+                    if domain_proposal is not None:
+                        result_status, result_message = _safe_purchase_proposal_decision(
+                            ApprovalDecision(
+                                proposal_id=domain_proposal.proposal_id,
+                                outcome="approve",
+                            ),
+                            actor=principal.username,
+                        )
                     else:
-                        st.error(result.get("message") or "核准失敗。")
-                    st.rerun()
+                        result = approve_action(
+                            item["id"], approver=principal.username
+                        )
+                        result_status = result.get("status")
+                        result_message = result.get("message")
+                    if _should_refresh_after_decision("approve", result_status):
+                        st.toast(f"提案 {item['id']} 已核准。")
+                        st.rerun()
+                    else:
+                        st.error(result_message or "核准失敗。")
             with reject_col:
                 if st.button(
                     "❌ 拒絕",
@@ -196,14 +313,26 @@ def _render_purchase_approval_dashboard(principal, pending_list, approval_histor
                     if not reason.strip():
                         st.warning("請先填寫拒絕原因。")
                     else:
-                        result = reject_action(
-                            item["id"], reason, approver=principal.username
-                        )
-                        if result.get("status") == "denied":
-                            st.toast(f"提案 {item['id']} 已拒絕。")
+                        if domain_proposal is not None:
+                            result_status, result_message = _safe_purchase_proposal_decision(
+                                ApprovalDecision(
+                                    proposal_id=domain_proposal.proposal_id,
+                                    outcome="reject",
+                                    reason=reason,
+                                ),
+                                actor=principal.username,
+                            )
                         else:
-                            st.error(result.get("message") or "拒絕失敗。")
-                        st.rerun()
+                            result = reject_action(
+                                item["id"], reason, approver=principal.username
+                            )
+                            result_status = result.get("status")
+                            result_message = result.get("message")
+                        if _should_refresh_after_decision("reject", result_status):
+                            st.toast(f"提案 {item['id']} 已拒絕。")
+                            st.rerun()
+                        else:
+                            st.error(result_message or "拒絕失敗。")
 
     st.markdown("---")
     st.markdown("### 🕒 採購提案審批歷史")
@@ -223,6 +352,20 @@ def _render_purchase_approval_dashboard(principal, pending_list, approval_histor
             st.markdown(
                 f"**提案內容**：`{format_parameters_to_chinese(item['tool'], item['raw_args'])}`"
             )
+            domain_proposal = None
+            evidence_error = None
+            if item.get("operation_id"):
+                try:
+                    domain_proposal = get_purchase_proposal_for_operation(
+                        item["operation_id"], actor=principal.username
+                    )
+                except (PermissionError, ValueError) as exc:
+                    evidence_error = str(exc)
+            if evidence_error:
+                st.error(f"提案證據驗證失敗：{evidence_error}")
+            elif domain_proposal is not None:
+                _render_domain_proposal_evidence(domain_proposal)
+                _render_operation_timeline(item["operation_id"], principal)
             if item["reason"]:
                 st.markdown(f"**拒絕原因**：{item['reason']}")
 
@@ -248,7 +391,9 @@ def render(username: str = ""):
     # ── 從資料庫取得最新審批資料 ──────────────────────────────
     pending_list = get_pending_list()
     if mode == "approvals":
-        pending_list = _filter_purchase_proposals(pending_list)
+        pending_list = _scope_purchase_records(
+            _filter_purchase_proposals(pending_list), principal
+        )
     pending_count = len(pending_list)
 
     # 讀取歷史審批紀錄
@@ -276,7 +421,9 @@ def render(username: str = ""):
         _render_purchase_approval_dashboard(
             principal,
             pending_list,
-            _filter_purchase_proposals(approval_history),
+            _scope_purchase_records(
+                _filter_purchase_proposals(approval_history), principal
+            ),
         )
         return
 

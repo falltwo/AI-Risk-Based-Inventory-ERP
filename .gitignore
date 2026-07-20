@@ -228,3 +228,7 @@ data/erp.db-wal
 data/*preview*.db*
 .preview/
 line bot/ngrok.exe
+
+# Local AI-assistant and planning state must never enter the public repository.
+.claude/
+.planning/
