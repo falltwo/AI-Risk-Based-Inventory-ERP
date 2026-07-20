@@ -14,22 +14,32 @@ from backend.supply_chain_risk import (
     what_if_simulation,
 )
 
+
+def _wrap_text(text, width=40):
+    """Wrap scalar hover text while treating database/Pandas nulls as empty."""
+    if text is None:
+        return ""
+    try:
+        if pd.isna(text):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(text)
+    lines = []
+    for i in range(0, len(text), width):
+        lines.append(text[i:i + width])
+    return "<br>".join(lines)
+
+
 def render_risk_heatmap(key: str = "risk_heatmap", heatmap_rows=None):
     """僅渲染風險熱圖 (Plotly Chart)。"""
-    def wrap_text(text, width=40):
-        if not text: return ""
-        lines = []
-        for i in range(0, len(text), width):
-            lines.append(text[i:i+width])
-        return "<br>".join(lines)
-
     if heatmap_rows is None:
         heatmap_rows = get_risk_heatmap_data()
     if heatmap_rows:
         df_heat = pd.DataFrame(heatmap_rows)
         df_heat["risk_pct"] = df_heat["risk_pct"].fillna(20)
         df_heat["hover_info"] = df_heat.apply(
-            lambda r: f"<b>{r['display_name']}</b><br>對您公司的影響：{r['risk_pct']:.0f}%<br>{wrap_text(r['ai_summary'] or '', 45)}",
+            lambda r: f"<b>{r['display_name']}</b><br>對您公司的影響：{r['risk_pct']:.0f}%<br>{_wrap_text(r['ai_summary'], 45)}",
             axis=1,
         )
         fig = px.scatter_geo(

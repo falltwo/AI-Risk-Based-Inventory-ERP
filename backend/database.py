@@ -66,11 +66,25 @@ def init_db():
         last_sync_operation_id TEXT,
         external_source_system TEXT,
         external_id TEXT,
-        external_version INTEGER
+        external_version INTEGER,
+        estimated_delay_days INTEGER,
+        alternative_suggestion TEXT
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS purchase_order_items (id INTEGER PRIMARY KEY AUTOINCREMENT, po_id TEXT, product_id TEXT, qty INTEGER, unit_price REAL)''')
     # 銷售：客戶、報價單、銷售單、收款
-    c.execute('''CREATE TABLE IF NOT EXISTS customers (customer_id TEXT PRIMARY KEY, name TEXT, contact TEXT, phone TEXT, email TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS customers (
+        customer_id TEXT PRIMARY KEY,
+        name TEXT,
+        company TEXT,
+        contact TEXT,
+        phone TEXT,
+        email TEXT,
+        country TEXT,
+        region TEXT,
+        latitude REAL,
+        longitude REAL,
+        risk_level TEXT
+    )''')
     c.execute('''CREATE TABLE IF NOT EXISTS quotations (quote_id TEXT PRIMARY KEY, customer_id TEXT, quote_date TEXT, status TEXT, total_amount REAL, valid_until TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS quotation_items (id INTEGER PRIMARY KEY AUTOINCREMENT, quote_id TEXT, product_id TEXT, qty INTEGER, unit_price REAL)''')
     c.execute('''CREATE TABLE IF NOT EXISTS orders (order_id TEXT PRIMARY KEY, customer_id TEXT, product_id TEXT, quantity INTEGER, status TEXT, order_date TEXT, total_amount REAL)''')
@@ -90,6 +104,15 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS carbon_factors (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id TEXT, scope INTEGER, kg_co2_per_unit REAL, note TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS supply_chain_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT, region TEXT, country TEXT, impact_days INTEGER, description TEXT, created_at TEXT, news_id INTEGER)''')
     c.execute('''CREATE TABLE IF NOT EXISTS supply_chain_news (id INTEGER PRIMARY KEY AUTOINCREMENT, country TEXT, region TEXT, title TEXT, summary TEXT, url TEXT, source TEXT, published_at TEXT, relevance_tag TEXT, fetched_at TEXT, category TEXT, is_relevant INTEGER DEFAULT 1, estimated_delay INTEGER)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS risk_heatmap (
+        region_key TEXT PRIMARY KEY,
+        display_name TEXT,
+        latitude REAL,
+        longitude REAL,
+        risk_pct REAL,
+        ai_summary TEXT,
+        updated_at TEXT
+    )''')
     c.execute('''CREATE TABLE IF NOT EXISTS esg_targets (id INTEGER PRIMARY KEY AUTOINCREMENT, target_year INTEGER, scope INTEGER, baseline_kg_co2 REAL, target_kg_co2 REAL, note TEXT)''')
     # 永續 ESG：風險管理係數（地區/事件類型/供應商類別 → 風險分數 0–100、權重）
     c.execute('''CREATE TABLE IF NOT EXISTS esg_risk_factors (id INTEGER PRIMARY KEY AUTOINCREMENT, risk_type TEXT, risk_key TEXT, risk_score REAL, weight REAL, note TEXT, updated_at TEXT, UNIQUE(risk_type, risk_key))''')
@@ -265,6 +288,8 @@ def init_db():
         ("external_source_system", "TEXT"),
         ("external_id", "TEXT"),
         ("external_version", "INTEGER"),
+        ("estimated_delay_days", "INTEGER"),
+        ("alternative_suggestion", "TEXT"),
     ):
         try:
             c.execute(
@@ -425,6 +450,18 @@ def init_db():
             c.execute("ALTER TABLE customers ADD COLUMN phone TEXT")
         if 'email' not in columns:
             c.execute("ALTER TABLE customers ADD COLUMN email TEXT")
+        if 'company' not in columns:
+            c.execute("ALTER TABLE customers ADD COLUMN company TEXT")
+        if 'country' not in columns:
+            c.execute("ALTER TABLE customers ADD COLUMN country TEXT")
+        if 'region' not in columns:
+            c.execute("ALTER TABLE customers ADD COLUMN region TEXT")
+        if 'latitude' not in columns:
+            c.execute("ALTER TABLE customers ADD COLUMN latitude REAL")
+        if 'longitude' not in columns:
+            c.execute("ALTER TABLE customers ADD COLUMN longitude REAL")
+        if 'risk_level' not in columns:
+            c.execute("ALTER TABLE customers ADD COLUMN risk_level TEXT")
     except sqlite3.OperationalError:
         pass
 
@@ -460,8 +497,12 @@ def init_db():
 
         c.execute("INSERT OR IGNORE INTO suppliers (supplier_id, name, contact, phone, email, is_official) VALUES ('SUP01', '鍵鼠供應商', '張先生', '02-12345678', 'sup@example.com', 1)")
         c.execute("INSERT OR IGNORE INTO suppliers (supplier_id, name, contact, phone, email, is_official) VALUES ('SUP02', '螢幕原廠', '李小姐', '03-87654321', 'lcd@example.com', 1)")
-        c.execute("INSERT OR IGNORE INTO customers VALUES ('C001', '科技公司A', '王經理', '02-11112222', 'a@example.com')")
-        c.execute("INSERT OR IGNORE INTO customers VALUES ('C002', '零售通路B', '陳主任', '02-33334444', 'b@example.com')")
+        c.execute("""INSERT OR IGNORE INTO customers
+            (customer_id, name, contact, phone, email)
+            VALUES ('C001', '科技公司A', '王經理', '02-11112222', 'a@example.com')""")
+        c.execute("""INSERT OR IGNORE INTO customers
+            (customer_id, name, contact, phone, email)
+            VALUES ('C002', '零售通路B', '陳主任', '02-33334444', 'b@example.com')""")
 
         hr_data = [
             ("E001", "王小明", "業務部", "資深業務", 45000),

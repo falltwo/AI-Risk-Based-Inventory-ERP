@@ -135,3 +135,10 @@ def test_page_does_not_store_uploaded_csv_bytes_in_session_state():
     assert "erp_csv_raw" not in source
     assert "erp_csv_upload_bytes" not in source
     assert "session_state[uploaded.getvalue()" not in source
+
+
+def test_export_caption_describes_immutable_approved_versions_truthfully():
+    source = _source("frontend/page_erp_csv_exchange.py")
+
+    assert "每次核准都固定為不可變快照" in source
+    assert "最新版本會被匯出" not in source

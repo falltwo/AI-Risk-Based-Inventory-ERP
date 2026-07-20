@@ -519,7 +519,10 @@ def seed_line_logs(conn: sqlite3.Connection, now: datetime) -> None:
 def validate_expected_schema(conn: sqlite3.Connection) -> None:
     required_columns = {
         "inventory": ["product_id", "stock", "reorder_point", "daily_sales", "baseline_reorder_point"],
-        "customers": ["customer_id", "name", "company", "contact", "country", "region"],
+        "customers": [
+            "customer_id", "name", "company", "contact", "country", "region",
+            "latitude", "longitude", "risk_level",
+        ],
         "suppliers": ["supplier_id", "country", "region", "latitude", "longitude", "risk_level", "is_official"],
         "purchase_orders": ["po_id", "supplier_id", "status", "estimated_delay_days", "alternative_suggestion"],
         "purchase_order_items": ["po_id", "product_id", "qty", "unit_price"],

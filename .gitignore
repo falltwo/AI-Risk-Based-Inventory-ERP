@@ -224,4 +224,7 @@ data/erp.db
 data/erp.db-journal
 data/erp.db-shm
 data/erp.db-wal
+# Local demo preview state must never enter repository history.
+data/*preview*.db*
+.preview/
 line bot/ngrok.exe
