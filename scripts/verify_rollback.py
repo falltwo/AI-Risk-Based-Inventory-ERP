@@ -53,7 +53,7 @@ def main():
     print(f"   待審批單 ID: {approval_id1}")
     
     print("2. 核准該進貨單...")
-    app_res1 = approve_action(approval_id1)
+    app_res1 = approve_action(approval_id1, approver="admin")
     stock_after_app = get_product_stock(product_id)
     print(f"   核准後庫存: {stock_after_app} (預期: {initial_stock + 15})")
     assert stock_after_app == initial_stock + 15, "Error: Stock failed to update!"
@@ -113,7 +113,7 @@ def main():
     print(f"   待審批單 ID: {approval_id2}")
     
     print("2. 核准該訂單...")
-    app_res2 = approve_action(approval_id2)
+    app_res2 = approve_action(approval_id2, approver="admin")
     orders_after_app = get_order_count(cust_id, order_pid, order_qty)
     stock_after_app_p3 = get_product_stock(order_pid)
     print(f"   核准後訂單數: {orders_after_app} (預期增加 1: {initial_orders + 1})")

@@ -61,6 +61,16 @@ def format_parameters_to_chinese(tool_name: str, args) -> str:
         if qty is not None:
             return f"{pid} 銷售 {qty} 件{cust_str}"
         return f"商品 ID: {pid}{cust_str}"
+
+    elif tool_name == "create_purchase_order":
+        po_id = args.get("po_id", "")
+        supplier_id = args.get("supplier_id", "")
+        product_id = args.get("product_id", "")
+        qty = args.get("qty", "")
+        return (
+            f"採購單 {po_id}｜供應商 {supplier_id}｜"
+            f"商品 {product_id} × {qty}"
+        )
         
     # 其他工具的參數 key 對照表
     key_mapping = {
@@ -110,7 +120,8 @@ def render():
                 "role": app["requester"],
                 "status": app["status"],
                 "reason": app["reason"] or "",
-                "processed_time": app["updated_at"]
+                "processed_time": app["updated_at"],
+                "operation_id": app.get("operation_id"),
             })
 
     # ── 頂部 Metrics 卡片 ───────────────────────────────────────────────
@@ -184,6 +195,8 @@ def render():
                     with col_item1:
                         st.markdown(f"##### 📋 申請單號：`{item['id']}`")
                         st.caption(f"🕒 請求時間：{item['time']} | 👤 申請者角色：`{item['role']}`")
+                        if item.get("operation_id"):
+                            st.caption(f"🔗 操作識別碼：`{item['operation_id']}`")
 
                         # 呈現詳情
                         st.markdown(f"**觸發 Agent**: `{item['agent']}` ({AGENTS.get(item['agent'], {}).get('name_zh', '未知')})")
@@ -196,6 +209,7 @@ def render():
                         st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
                         # 檢查目前登入角色是否為 admin
                         current_role = st.session_state.get("role", "guest")
+                        current_username = st.session_state.get("username", "")
 
                         if current_role == "admin":
                             # 輸入拒絕原因的文字框
@@ -206,7 +220,9 @@ def render():
                             with btn_col1:
                                 if st.button("✅ 核准", key=f"appr_{item['id']}", use_container_width=True):
                                     # 呼叫後端核准
-                                    res = approve_action(item['id'])
+                                    res = approve_action(
+                                        item['id'], approver=current_username
+                                    )
                                     if res.get("status") == "ok" or res.get("status") == "pending":
                                         st.toast(f"已成功核准單號 {item['id']}！")
                                     else:
@@ -218,8 +234,15 @@ def render():
                                         st.warning("請先填寫拒絕原因！")
                                     else:
                                         # 呼叫後端拒絕，傳入原因
-                                        reject_action(item['id'], rej_reason)
-                                        st.toast(f"已拒絕單號 {item['id']} 調用請求。")
+                                        res = reject_action(
+                                            item['id'],
+                                            rej_reason,
+                                            approver=current_username,
+                                        )
+                                        if res.get("status") == "denied":
+                                            st.toast(f"已拒絕單號 {item['id']} 調用請求。")
+                                        else:
+                                            st.error(f"拒絕失敗：{res.get('message')}")
                                         st.rerun()
                         else:
                             st.info("🔒 唯讀：需登入管理員 (admin) 帳號進行審批")
@@ -239,6 +262,8 @@ def render():
                             reason_msg = f" | 原因: `{item['reason']}`" if item["reason"] else ""
                             st.markdown(f"**單號**: `{item['id']}` ({status_emoji} {status_zh}{reason_msg})")
                             st.caption(f"🕒 請求時間：{item['time']} | 處理時間：{item['processed_time']} | 申請人：`{item['role']}`")
+                            if item.get("operation_id"):
+                                st.caption(f"🔗 操作識別碼：`{item['operation_id']}`")
                             readable_args = format_parameters_to_chinese(item['tool'], item['raw_args'])
                             st.markdown(f"**調用工具**: `{item['tool']}` | **參數**: `{readable_args}`")
 

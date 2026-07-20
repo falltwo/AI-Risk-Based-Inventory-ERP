@@ -122,6 +122,12 @@ TOOL_CLASSIFICATION = {
         "allowed_roles": ["admin", "warehouse"],
         "description": "查詢採購單摘要",
     },
+    "create_purchase_order": {
+        "module": "procurement",
+        "risk_level": "write",
+        "allowed_roles": ["admin", "warehouse"],
+        "description": "建立採購單與明細，核准後才會寫入資料庫",
+    },
 
     # ── 財務模組 ──────────────────────────────────────────────
     "get_ledger_summary": {

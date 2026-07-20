@@ -55,7 +55,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS stock_moves (move_id INTEGER PRIMARY KEY AUTOINCREMENT, product_id TEXT, warehouse_id TEXT, qty INTEGER, move_type TEXT, ref_no TEXT, move_date TEXT, note TEXT)''')
     # 採購：供應商、採購單
     c.execute('''CREATE TABLE IF NOT EXISTS suppliers (supplier_id TEXT PRIMARY KEY, name TEXT, contact TEXT, phone TEXT, email TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS purchase_orders (po_id TEXT PRIMARY KEY, supplier_id TEXT, order_date TEXT, status TEXT, total_amount REAL, note TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS purchase_orders (po_id TEXT PRIMARY KEY, supplier_id TEXT, order_date TEXT, status TEXT, total_amount REAL, note TEXT, operation_id TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS purchase_order_items (id INTEGER PRIMARY KEY AUTOINCREMENT, po_id TEXT, product_id TEXT, qty INTEGER, unit_price REAL)''')
     # 銷售：客戶、報價單、銷售單、收款
     c.execute('''CREATE TABLE IF NOT EXISTS customers (customer_id TEXT PRIMARY KEY, name TEXT, contact TEXT, phone TEXT, email TEXT)''')
@@ -113,7 +113,21 @@ def init_db():
         created_at TEXT,
         updated_at TEXT,
         reason TEXT,
-        checksum TEXT
+        checksum TEXT,
+        operation_id TEXT,
+        payload_digest TEXT,
+        resource_version TEXT,
+        policy_version TEXT,
+        version INTEGER NOT NULL DEFAULT 0
+    )''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS effect_receipts (
+        receipt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        operation_id TEXT NOT NULL UNIQUE,
+        approval_id TEXT NOT NULL UNIQUE,
+        payload_digest TEXT NOT NULL,
+        result TEXT NOT NULL,
+        created_at TEXT NOT NULL
     )''')
 
     # 確保待審批表包含 reason 欄位
@@ -131,6 +145,36 @@ def init_db():
         c.execute("ALTER TABLE pending_approvals ADD COLUMN checksum TEXT")
     except sqlite3.OperationalError:
         pass
+
+    # A′：舊資料庫的審批列保留不動；新增欄位允許 NULL，只有新版操作受唯一鍵保護。
+    pending_approval_migrations = (
+        ("operation_id", "TEXT"),
+        ("payload_digest", "TEXT"),
+        ("resource_version", "TEXT"),
+        ("policy_version", "TEXT"),
+        ("version", "INTEGER NOT NULL DEFAULT 0"),
+    )
+    for column_name, column_type in pending_approval_migrations:
+        try:
+            c.execute(
+                f"ALTER TABLE pending_approvals ADD COLUMN {column_name} {column_type}"
+            )
+        except sqlite3.OperationalError:
+            pass
+
+    c.execute('''CREATE UNIQUE INDEX IF NOT EXISTS uq_pending_approvals_operation_id
+        ON pending_approvals(operation_id)
+        WHERE operation_id IS NOT NULL''')
+
+    # A′：新建的採購單與核准 operation 建立一對一連結。
+    # 舊資料保留 NULL，因此可以無損升級且不會被誤綁定。
+    try:
+        c.execute("ALTER TABLE purchase_orders ADD COLUMN operation_id TEXT")
+    except sqlite3.OperationalError:
+        pass
+    c.execute('''CREATE UNIQUE INDEX IF NOT EXISTS uq_purchase_orders_operation_id
+        ON purchase_orders(operation_id)
+        WHERE operation_id IS NOT NULL''')
 
     # F7：確保派工紀錄表存在（agent_dispatch_logs 原由 dispatch_logger 動態建，
     # 這裡預建讓 init_db 後 4 大治理效益 view 立即可用）
@@ -279,8 +323,8 @@ def init_db():
             c.execute("INSERT OR IGNORE INTO inventory (product_id, name, stock, price, cost, reorder_point, daily_sales, barcode, warehouse_id) VALUES (?,?,?,?,?,?,?,?,?)",
                       (row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8]))
 
-        c.execute("INSERT OR IGNORE INTO suppliers (supplier_id, name, contact, phone, email) VALUES ('SUP01', '鍵鼠供應商', '張先生', '02-12345678', 'sup@example.com')")
-        c.execute("INSERT OR IGNORE INTO suppliers (supplier_id, name, contact, phone, email) VALUES ('SUP02', '螢幕原廠', '李小姐', '03-87654321', 'lcd@example.com')")
+        c.execute("INSERT OR IGNORE INTO suppliers (supplier_id, name, contact, phone, email, is_official) VALUES ('SUP01', '鍵鼠供應商', '張先生', '02-12345678', 'sup@example.com', 1)")
+        c.execute("INSERT OR IGNORE INTO suppliers (supplier_id, name, contact, phone, email, is_official) VALUES ('SUP02', '螢幕原廠', '李小姐', '03-87654321', 'lcd@example.com', 1)")
         c.execute("INSERT OR IGNORE INTO customers VALUES ('C001', '科技公司A', '王經理', '02-11112222', 'a@example.com')")
         c.execute("INSERT OR IGNORE INTO customers VALUES ('C002', '零售通路B', '陳主任', '02-33334444', 'b@example.com')")
 
@@ -399,13 +443,15 @@ from contextlib import contextmanager
 
 
 @contextmanager
-def transaction():
+def transaction(immediate: bool = False):
     """
     開啟一個交易邊界，讓「讀 prev_hash → 算 row_hash → 寫新列」在同一連線、
     同一 commit 內原子完成。任何中途例外都會自動 rollback。
     """
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=5.0)
+    conn.execute("PRAGMA busy_timeout = 5000")
     try:
+        conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
         yield conn
         conn.commit()
     except Exception:

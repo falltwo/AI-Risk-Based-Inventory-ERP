@@ -3,8 +3,147 @@ backend/procurement.py
 採購管理 AI 工具函式（供應商、採購單、應付帳款）
 """
 
+import math
+import sqlite3
+
 from .database import run_query
 from .auth import check_permission
+
+
+# 只有 Tool Gateway 的核准交易路徑會持有此 module-private sentinel。
+# 這是應用程式內的防誤用邊界，不是可抵擋惡意 Python 程式碼的密碼邊界。
+_PO_APPROVAL_CONTEXT = object()
+
+
+def _required_text(value, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be a non-empty string")
+    return value.strip()
+
+
+def create_purchase_order(
+    po_id: str,
+    supplier_id: str,
+    product_id: str,
+    qty: int,
+    unit_price: float,
+    order_date: str,
+    status: str,
+    note: str = "",
+    **_internal,
+) -> dict:
+    """Create one PO header and item inside an already-approved DB transaction.
+
+    This protected write primitive deliberately cannot open or commit its own
+    connection. The Tool Gateway must inject the active approval context,
+    SQLite connection, and stable operation ID after revalidating approval.
+    """
+    approval_context = _internal.get("_approval_context")
+    conn = _internal.get("_conn")
+    operation_id = _internal.get("_operation_id")
+    if (
+        approval_context is not _PO_APPROVAL_CONTEXT
+        or not isinstance(conn, sqlite3.Connection)
+        or not conn.in_transaction
+        or not isinstance(operation_id, str)
+        or not operation_id.strip()
+    ):
+        raise PermissionError(
+            "create_purchase_order requires an active approved Gateway transaction"
+        )
+
+    po_id = _required_text(po_id, "po_id")
+    supplier_id = _required_text(supplier_id, "supplier_id")
+    product_id = _required_text(product_id, "product_id")
+    order_date = _required_text(order_date, "order_date")
+    status = _required_text(status, "status")
+    operation_id = operation_id.strip()
+
+    executing_approval = conn.execute(
+        """
+        SELECT 1 FROM pending_approvals
+        WHERE operation_id = ?
+          AND tool_name = 'create_purchase_order'
+          AND status = 'executing'
+        LIMIT 1
+        """,
+        (operation_id,),
+    ).fetchone()
+    if executing_approval is None:
+        raise PermissionError(
+            "create_purchase_order requires a matching executing approval"
+        )
+
+    if isinstance(note, str):
+        note = note.strip()
+    elif note is None:
+        note = ""
+    else:
+        raise ValueError("note must be a string")
+
+    if isinstance(qty, bool) or not isinstance(qty, int) or qty <= 0:
+        raise ValueError("qty must be a positive integer")
+    if isinstance(unit_price, bool) or not isinstance(unit_price, (int, float)):
+        raise ValueError("unit_price must be a non-negative finite number")
+    unit_price = float(unit_price)
+    if not math.isfinite(unit_price) or unit_price < 0:
+        raise ValueError("unit_price must be a non-negative finite number")
+
+    supplier = conn.execute(
+        "SELECT is_official FROM suppliers WHERE supplier_id = ?",
+        (supplier_id,),
+    ).fetchone()
+    if supplier is None:
+        raise ValueError(f"unknown supplier_id: {supplier_id}")
+    if supplier[0] != 1:
+        raise PermissionError(f"supplier is not official: {supplier_id}")
+
+    product = conn.execute(
+        "SELECT 1 FROM inventory WHERE product_id = ?",
+        (product_id,),
+    ).fetchone()
+    if product is None:
+        raise ValueError(f"unknown product_id: {product_id}")
+
+    total_amount = qty * unit_price
+    conn.execute(
+        """
+        INSERT INTO purchase_orders (
+            po_id, supplier_id, order_date, status, total_amount, note,
+            operation_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            po_id,
+            supplier_id,
+            order_date,
+            status,
+            total_amount,
+            note,
+            operation_id,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO purchase_order_items (
+            po_id, product_id, qty, unit_price
+        ) VALUES (?, ?, ?, ?)
+        """,
+        (po_id, product_id, qty, unit_price),
+    )
+
+    return {
+        "po_id": po_id,
+        "operation_id": operation_id,
+        "supplier_id": supplier_id,
+        "product_id": product_id,
+        "qty": qty,
+        "unit_price": unit_price,
+        "total_amount": total_amount,
+        "order_date": order_date,
+        "status": status,
+        "note": note,
+    }
 
 
 def get_payables() -> str:
