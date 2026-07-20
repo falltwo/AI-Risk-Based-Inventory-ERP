@@ -244,7 +244,8 @@ def transition_approval_status(
         if tool_row is None:
             return False
         if (
-            tool_row[0] == "create_purchase_order"
+            tool_row[0]
+            in {"create_purchase_order", "sync_external_purchase_order"}
             and approval_context is not _PROTECTED_APPROVAL_CONTEXT
         ):
             return False

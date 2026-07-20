@@ -55,7 +55,19 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS stock_moves (move_id INTEGER PRIMARY KEY AUTOINCREMENT, product_id TEXT, warehouse_id TEXT, qty INTEGER, move_type TEXT, ref_no TEXT, move_date TEXT, note TEXT)''')
     # 採購：供應商、採購單
     c.execute('''CREATE TABLE IF NOT EXISTS suppliers (supplier_id TEXT PRIMARY KEY, name TEXT, contact TEXT, phone TEXT, email TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS purchase_orders (po_id TEXT PRIMARY KEY, supplier_id TEXT, order_date TEXT, status TEXT, total_amount REAL, note TEXT, operation_id TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS purchase_orders (
+        po_id TEXT PRIMARY KEY,
+        supplier_id TEXT,
+        order_date TEXT,
+        status TEXT,
+        total_amount REAL,
+        note TEXT,
+        operation_id TEXT,
+        last_sync_operation_id TEXT,
+        external_source_system TEXT,
+        external_id TEXT,
+        external_version INTEGER
+    )''')
     c.execute('''CREATE TABLE IF NOT EXISTS purchase_order_items (id INTEGER PRIMARY KEY AUTOINCREMENT, po_id TEXT, product_id TEXT, qty INTEGER, unit_price REAL)''')
     # 銷售：客戶、報價單、銷售單、收款
     c.execute('''CREATE TABLE IF NOT EXISTS customers (customer_id TEXT PRIMARY KEY, name TEXT, contact TEXT, phone TEXT, email TEXT)''')
@@ -130,6 +142,78 @@ def init_db():
         created_at TEXT NOT NULL
     )''')
 
+    # L3 ERP CSV exchange: validated staging is kept separate from live PO data.
+    # A stable (source_system, external_id) identifies one external record while
+    # version/content_digest identify the exact revision submitted for approval.
+    c.execute('''CREATE TABLE IF NOT EXISTS erp_exchange_records (
+        source_system TEXT NOT NULL,
+        external_id TEXT NOT NULL,
+        po_id TEXT NOT NULL,
+        supplier_id TEXT NOT NULL,
+        product_id TEXT NOT NULL,
+        qty INTEGER NOT NULL,
+        unit_price REAL NOT NULL,
+        order_date TEXT NOT NULL,
+        status TEXT NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        content_digest TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        last_synced_version INTEGER,
+        last_synced_operation_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (source_system, external_id),
+        UNIQUE (source_system, po_id)
+    )''')
+
+    # External acknowledgements are distinct from effect_receipts. The latter
+    # proves the local SQLite effect; this table proves a returned ERP receipt
+    # matched the exact approved operation and payload.
+    c.execute('''CREATE TABLE IF NOT EXISTS erp_exchange_receipts (
+        operation_id TEXT PRIMARY KEY,
+        source_system TEXT NOT NULL,
+        external_id TEXT NOT NULL,
+        approval_id TEXT NOT NULL,
+        payload_digest TEXT NOT NULL,
+        receipt_attempt_id TEXT,
+        receipt_status TEXT NOT NULL,
+        message TEXT NOT NULL DEFAULT '',
+        key_id TEXT,
+        signature TEXT,
+        received_by TEXT NOT NULL,
+        received_at TEXT NOT NULL
+    )''')
+
+    for column_name, column_type in (
+        ("receipt_attempt_id", "TEXT"),
+        ("key_id", "TEXT"),
+        ("signature", "TEXT"),
+        ("received_by", "TEXT"),
+    ):
+        try:
+            c.execute(
+                f"ALTER TABLE erp_exchange_receipts ADD COLUMN {column_name} {column_type}"
+            )
+        except sqlite3.OperationalError:
+            pass
+
+    c.execute('''CREATE TABLE IF NOT EXISTS erp_exchange_receipt_events (
+        receipt_attempt_id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL,
+        source_system TEXT NOT NULL,
+        external_id TEXT NOT NULL,
+        approval_id TEXT NOT NULL,
+        payload_digest TEXT NOT NULL,
+        receipt_status TEXT NOT NULL,
+        message TEXT NOT NULL DEFAULT '',
+        key_id TEXT NOT NULL,
+        signature TEXT NOT NULL,
+        received_by TEXT NOT NULL,
+        received_at TEXT NOT NULL
+    )''')
+    c.execute('''CREATE INDEX IF NOT EXISTS ix_erp_exchange_receipt_events_operation
+        ON erp_exchange_receipt_events(operation_id, received_at)''')
+
     # 確保待審批表包含 reason 欄位
     try:
         c.execute("ALTER TABLE pending_approvals ADD COLUMN reason TEXT")
@@ -175,6 +259,22 @@ def init_db():
     c.execute('''CREATE UNIQUE INDEX IF NOT EXISTS uq_purchase_orders_operation_id
         ON purchase_orders(operation_id)
         WHERE operation_id IS NOT NULL''')
+
+    for column_name, column_type in (
+        ("last_sync_operation_id", "TEXT"),
+        ("external_source_system", "TEXT"),
+        ("external_id", "TEXT"),
+        ("external_version", "INTEGER"),
+    ):
+        try:
+            c.execute(
+                f"ALTER TABLE purchase_orders ADD COLUMN {column_name} {column_type}"
+            )
+        except sqlite3.OperationalError:
+            pass
+    c.execute('''CREATE UNIQUE INDEX IF NOT EXISTS uq_purchase_orders_external_record
+        ON purchase_orders(external_source_system, external_id)
+        WHERE external_source_system IS NOT NULL AND external_id IS NOT NULL''')
 
     # F7：確保派工紀錄表存在（agent_dispatch_logs 原由 dispatch_logger 動態建，
     # 這裡預建讓 init_db 後 4 大治理效益 view 立即可用）

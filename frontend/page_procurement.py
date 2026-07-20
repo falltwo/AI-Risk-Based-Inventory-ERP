@@ -45,9 +45,15 @@ def resolve_po_approval_state(
 
 def render(sub_menu: str):
     st.markdown("<div class='premium-title'>🛒 採購管理</div>", unsafe_allow_html=True)
-    menus = ['採購單', '供應商管理', '進貨成本', '採購歷史']
+    menus = ['採購單', '供應商管理', '進貨成本', '採購歷史', 'ERP CSV 交換']
     styled_menus = [f"🌟 **{m}**" if m == sub_menu else f"{m}" for m in menus]
     st.markdown(" ｜ ".join(styled_menus))
+
+    if sub_menu == "ERP CSV 交換":
+        from frontend.page_erp_csv_exchange import render as render_erp_csv_exchange
+
+        render_erp_csv_exchange()
+        return
 
     if sub_menu == "採購單":
         st.subheader("採購單", divider="blue")

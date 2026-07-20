@@ -19,6 +19,7 @@ from datetime import datetime
 from backend.tool_registry import registry
 from backend.agent_registry import get_tools_for_agent, get_agent
 from backend import tools_mapping
+from backend.erp_exchange import ERP_EXCHANGE_POLICY_VERSION
 
 
 PO_APPROVAL_POLICY_VERSION = "po-approval-v1"
@@ -32,9 +33,15 @@ def canonical_payload_digest(
     policy_version: str,
 ) -> str:
     """Return a stable digest of the exact action that a person will approve."""
+    target = (args or {}).get("po_id")
+    if tool_name == "sync_external_purchase_order":
+        target = {
+            "source_system": (args or {}).get("source_system"),
+            "external_id": (args or {}).get("external_id"),
+        }
     payload = {
         "action": tool_name,
-        "target": (args or {}).get("po_id"),
+        "target": target,
         "parameters": args or {},
         "resource_version": resource_version,
         "policy_version": policy_version,
@@ -130,10 +137,15 @@ def _create_pending_approval(
     return approval_id
 
 
-def _replay_purchase_order_operation(
-    operation_id: str, args: dict
+def _replay_protected_operation(
+    operation_id: str,
+    args: dict,
+    *,
+    expected_tool: str,
+    expected_resource_version: str,
+    expected_policy_version: str,
 ) -> "GatewayResult | None":
-    """Return the durable state for an existing PO operation, if one exists."""
+    """Return the durable state for an existing protected operation."""
     from backend.database import run_query
 
     rows = run_query(
@@ -157,9 +169,9 @@ def _replay_purchase_order_operation(
         policy_version,
     ) = rows[0]
     if (
-        tool_name != "create_purchase_order"
-        or resource_version != "absent"
-        or policy_version != PO_APPROVAL_POLICY_VERSION
+        tool_name != expected_tool
+        or resource_version != expected_resource_version
+        or policy_version != expected_policy_version
         or not stored_digest
     ):
         return GatewayResult(
@@ -177,7 +189,7 @@ def _replay_purchase_order_operation(
     if not hmac.compare_digest(stored_digest, submitted_digest):
         return GatewayResult(
             status="error",
-            message="operation_id 已綁定不同的採購單內容。",
+            message="operation_id 已綁定不同的受保護操作內容。",
             approval_id=approval_id,
         )
 
@@ -223,6 +235,57 @@ def _replay_purchase_order_operation(
         status="error",
         message=f"此操作目前狀態為 {status}，請稍後再查。",
         approval_id=approval_id,
+    )
+
+
+def _replay_purchase_order_operation(
+    operation_id: str, args: dict
+) -> "GatewayResult | None":
+    """Backward-compatible wrapper for protected PO creation replay."""
+    return _replay_protected_operation(
+        operation_id,
+        args,
+        expected_tool="create_purchase_order",
+        expected_resource_version="absent",
+        expected_policy_version=PO_APPROVAL_POLICY_VERSION,
+    )
+
+
+def _replay_protected_operation_from_storage(
+    operation_id: str,
+    args: dict,
+    *,
+    expected_tool: str,
+    expected_policy_version: str,
+) -> "GatewayResult | None":
+    """Replay before consulting mutable current resource state."""
+    from backend.database import run_query
+
+    rows = run_query(
+        """
+        SELECT tool_name, resource_version, policy_version
+        FROM pending_approvals WHERE operation_id = ?
+        """,
+        (operation_id,),
+    )
+    if not rows:
+        return None
+    tool_name, resource_version, policy_version = rows[0]
+    if (
+        tool_name != expected_tool
+        or policy_version != expected_policy_version
+        or not resource_version
+    ):
+        return GatewayResult(
+            status="error",
+            message="既有 operation_id 的審批類型或政策版本不符。",
+        )
+    return _replay_protected_operation(
+        operation_id,
+        args,
+        expected_tool=expected_tool,
+        expected_resource_version=resource_version,
+        expected_policy_version=expected_policy_version,
     )
 
 
@@ -340,31 +403,72 @@ class ToolGateway:
             try:
                 resource_version = "unspecified"
                 policy_version = PO_APPROVAL_POLICY_VERSION
-                protected_po = tool_name == "create_purchase_order"
+                protected_po = tool_name in {
+                    "create_purchase_order",
+                    "sync_external_purchase_order",
+                }
                 if protected_po:
                     operation_id = str(operation_id or "").strip()
                     if not operation_id:
                         raise ValueError(
-                            "建立採購單必須提供穩定的 operation_id。"
+                            "受保護採購操作必須提供穩定的 operation_id。"
                         )
-                    po_id = str(args.get("po_id") or "").strip()
-                    if not po_id:
-                        raise ValueError("採購單號不可為空白。")
-                    resource_version = "absent"
+                    if tool_name == "create_purchase_order":
+                        po_id = str(args.get("po_id") or "").strip()
+                        if not po_id:
+                            raise ValueError("採購單號不可為空白。")
+                        resource_version = "absent"
+                        policy_version = PO_APPROVAL_POLICY_VERSION
+                    else:
+                        from backend.erp_exchange import (
+                            build_exchange_operation_id,
+                            exchange_resource_version,
+                            get_exchange_record,
+                        )
 
-                    replay = _replay_purchase_order_operation(
-                        operation_id, args
+                        replay = _replay_protected_operation_from_storage(
+                            operation_id,
+                            args,
+                            expected_tool=tool_name,
+                            expected_policy_version=ERP_EXCHANGE_POLICY_VERSION,
+                        )
+                        if replay is not None:
+                            return replay
+                        source_system = str(args.get("source_system") or "").strip()
+                        external_id = str(args.get("external_id") or "").strip()
+                        record = get_exchange_record(source_system, external_id)
+                        if record is None:
+                            raise ValueError("找不到待同步的 ERP 交換資料。")
+                        resource_version = exchange_resource_version(record)
+                        policy_version = ERP_EXCHANGE_POLICY_VERSION
+                        expected_operation_id = build_exchange_operation_id(
+                            source_system, external_id, record["version"]
+                        )
+                        if not hmac.compare_digest(
+                            operation_id, expected_operation_id
+                        ):
+                            raise ValueError(
+                                "operation_id 與 ERP 交換資料版本不相符。"
+                            )
+
+                    replay = _replay_protected_operation(
+                        operation_id,
+                        args,
+                        expected_tool=tool_name,
+                        expected_resource_version=resource_version,
+                        expected_policy_version=policy_version,
                     )
                     if replay is not None:
                         return replay
 
-                    from backend.database import run_query
+                    if tool_name == "create_purchase_order":
+                        from backend.database import run_query
 
-                    if run_query(
-                        "SELECT 1 FROM purchase_orders WHERE po_id = ? LIMIT 1",
-                        (po_id,),
-                    ):
-                        raise ValueError(f"採購單號 {po_id} 已存在。")
+                        if run_query(
+                            "SELECT 1 FROM purchase_orders WHERE po_id = ? LIMIT 1",
+                            (po_id,),
+                        ):
+                            raise ValueError(f"採購單號 {po_id} 已存在。")
 
                 approval_id = _create_pending_approval(
                     tool_name,
@@ -375,8 +479,12 @@ class ToolGateway:
                     policy_version=policy_version,
                 )
                 if protected_po:
-                    replay = _replay_purchase_order_operation(
-                        operation_id, args
+                    replay = _replay_protected_operation(
+                        operation_id,
+                        args,
+                        expected_tool=tool_name,
+                        expected_resource_version=resource_version,
+                        expected_policy_version=policy_version,
                     )
                     if replay is None:
                         raise RuntimeError("審批單建立後無法讀回。")
@@ -452,6 +560,12 @@ class ToolGateway:
 
         if item["tool_name"] == "create_purchase_order":
             return self._approve_purchase_order(approval_id, approver)
+        if item["tool_name"] == "sync_external_purchase_order":
+            return self._approve_purchase_order(
+                approval_id,
+                approver,
+                expected_tool="sync_external_purchase_order",
+            )
             
         if item["status"] != "pending":
             return GatewayResult(status="error", message=f"該審批項目的狀態為 {item['status']}，無法重複核准。")
@@ -481,9 +595,13 @@ class ToolGateway:
         return result_gateway
 
     def _approve_purchase_order(
-        self, approval_id: str, approver: str
+        self,
+        approval_id: str,
+        approver: str,
+        *,
+        expected_tool: str = "create_purchase_order",
     ) -> GatewayResult:
-        """Commit the protected PO effect, receipt, and final state atomically."""
+        """Commit a protected PO effect, receipt, and final state atomically."""
         from backend.agent_logger import (
             _PROTECTED_APPROVAL_CONTEXT,
             transition_approval_status,
@@ -491,6 +609,11 @@ class ToolGateway:
         )
         from backend.database import transaction
         from backend.procurement import _PO_APPROVAL_CONTEXT
+        from backend.erp_exchange import (
+            _ERP_EXCHANGE_APPROVAL_CONTEXT,
+            exchange_resource_version,
+            get_exchange_record,
+        )
 
         failure_args = {"approval_id": approval_id}
         try:
@@ -511,7 +634,7 @@ class ToolGateway:
                         status="error",
                         message=f"找不到 ID 為 {approval_id} 的審批項目。",
                     )
-                if item["tool_name"] != "create_purchase_order":
+                if item["tool_name"] != expected_tool:
                     return GatewayResult(
                         status="error", message="審批單工具類型不相符。"
                     )
@@ -542,14 +665,20 @@ class ToolGateway:
                     return GatewayResult(
                         status="error", message="審批單缺少必要的完整性欄位。"
                     )
-                if policy_version != PO_APPROVAL_POLICY_VERSION:
+                expected_policy_version = (
+                    PO_APPROVAL_POLICY_VERSION
+                    if expected_tool == "create_purchase_order"
+                    else ERP_EXCHANGE_POLICY_VERSION
+                )
+                if policy_version != expected_policy_version:
                     return GatewayResult(
                         status="error", message="審批政策版本不受支援，請重新送審。"
                     )
-                if resource_version != "absent":
-                    return GatewayResult(
-                        status="error", message="採購單資源版本已失效，請重新送審。"
-                    )
+                if expected_tool == "create_purchase_order":
+                    if resource_version != "absent":
+                        return GatewayResult(
+                            status="error", message="採購單資源版本已失效，請重新送審。"
+                        )
 
                 try:
                     args = json.loads(item["parameters"])
@@ -601,21 +730,36 @@ class ToolGateway:
                         status="ok", data=json.loads(receipt["result"])
                     )
 
+                if expected_tool == "sync_external_purchase_order":
+                    staged = get_exchange_record(
+                        str(args.get("source_system") or ""),
+                        str(args.get("external_id") or ""),
+                        conn=conn,
+                    )
+                    if staged is None or not hmac.compare_digest(
+                        resource_version, exchange_resource_version(staged)
+                    ):
+                        return GatewayResult(
+                            status="error",
+                            message="ERP 交換資料版本已失效，請重新送審。",
+                        )
+
                 if item["status"] != "pending":
                     return GatewayResult(
                         status="error",
                         message=f"該審批項目的狀態為 {item['status']}，無法核准。",
                     )
 
-                po_id = str(args.get("po_id") or "").strip()
-                if conn.execute(
-                    "SELECT 1 FROM purchase_orders WHERE po_id = ? LIMIT 1",
-                    (po_id,),
-                ).fetchone():
-                    return GatewayResult(
-                        status="error",
-                        message="採購單資源已存在，原核准內容已過期。",
-                    )
+                if expected_tool == "create_purchase_order":
+                    po_id = str(args.get("po_id") or "").strip()
+                    if conn.execute(
+                        "SELECT 1 FROM purchase_orders WHERE po_id = ? LIMIT 1",
+                        (po_id,),
+                    ).fetchone():
+                        return GatewayResult(
+                            status="error",
+                            message="採購單資源已存在，原核准內容已過期。",
+                        )
 
                 start_version = int(item["version"])
                 if not transition_approval_status(
@@ -629,12 +773,21 @@ class ToolGateway:
                 ):
                     raise RuntimeError("審批狀態競態，未取得執行權。")
 
-                result = tools_mapping["create_purchase_order"](
-                    **args,
-                    _conn=conn,
-                    _operation_id=operation_id,
-                    _approval_context=_PO_APPROVAL_CONTEXT,
-                )
+                if expected_tool == "create_purchase_order":
+                    result = tools_mapping[expected_tool](
+                        **args,
+                        _conn=conn,
+                        _operation_id=operation_id,
+                        _approval_context=_PO_APPROVAL_CONTEXT,
+                    )
+                else:
+                    result = tools_mapping[expected_tool](
+                        **args,
+                        _conn=conn,
+                        _operation_id=operation_id,
+                        _resource_version=resource_version,
+                        _approval_context=_ERP_EXCHANGE_APPROVAL_CONTEXT,
+                    )
                 result_json = json.dumps(
                     result,
                     ensure_ascii=False,
@@ -679,7 +832,7 @@ class ToolGateway:
         except Exception as exc:
             msg = f"受保護採購單執行失敗：{exc}"
             _write_log(
-                "create_purchase_order",
+                expected_tool,
                 failure_args,
                 approver,
                 msg,
@@ -701,7 +854,10 @@ class ToolGateway:
         if not item:
             return GatewayResult(status="error", message=f"找不到 ID 為 {approval_id} 的審批項目。")
             
-        if item["tool_name"] == "create_purchase_order":
+        if item["tool_name"] in {
+            "create_purchase_order",
+            "sync_external_purchase_order",
+        }:
             return self._reject_purchase_order(approval_id, reason, approver)
 
         if item["status"] != "pending":
@@ -754,6 +910,13 @@ class ToolGateway:
                         status="error",
                         message=f"找不到 ID 為 {approval_id} 的審批項目。",
                     )
+                if row[0] not in {
+                    "create_purchase_order",
+                    "sync_external_purchase_order",
+                }:
+                    return GatewayResult(
+                        status="error", message="審批單工具類型不相符。"
+                    )
                 actor = conn.execute(
                     "SELECT role FROM users WHERE username = ?", (approver,)
                 ).fetchone()
@@ -796,10 +959,13 @@ class ToolGateway:
         僅供已人工核准的補償操作直接執行（跳過 write 攔截），並寫入 action log。
         適用場景：Dashboard 沖銷/重試，管理員已人工確認，不需再送審批。
         """
-        if tool_name == "create_purchase_order":
+        if tool_name in {
+            "create_purchase_order",
+            "sync_external_purchase_order",
+        }:
             return GatewayResult(
                 status="denied",
-                message="建立採購單不得繞過 operation-bound 人工審批。",
+                message="受保護採購操作不得繞過 operation-bound 人工審批。",
             )
         return self._execute(tool_name, args, role)
 

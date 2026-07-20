@@ -164,6 +164,9 @@ def logout():
     st.session_state.logged_in = False
     st.session_state.menu_selection = "📊 營運分析看板"
     st.session_state.sub_menu = None
+    for key in list(st.session_state.keys()):
+        if key.startswith("erp_csv_"):
+            del st.session_state[key]
     if "messages" in st.session_state:
         st.session_state.messages = []
     st.rerun()
@@ -221,7 +224,7 @@ FULL_MENU = {
     "📊 營運分析看板": [],
     "🤖 AI 智能助理": ["對話介面", "LINE 客服記錄", "Agent Dashboard"],
     "📦 進銷存": ["商品管理", "庫存數量", "入庫/出庫", "條碼掃描", "倉庫管理"],
-    "🛒 採購管理": ["採購單", "供應商管理", "進貨成本", "採購歷史"],
+    "🛒 採購管理": ["採購單", "供應商管理", "進貨成本", "採購歷史", "ERP CSV 交換"],
     "💰 銷售管理": ["報價單", "銷售單", "客戶消費視覺化", "客戶個人消費分析", "收款管理"],
     "📒 財務會計": ["應收/應付", "總帳", "成本分析", "財報"],
     "👥 人資": ["員工資料", "薪資", "出勤"],

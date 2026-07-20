@@ -128,6 +128,12 @@ TOOL_CLASSIFICATION = {
         "allowed_roles": ["admin", "warehouse"],
         "description": "建立採購單與明細，核准後才會寫入資料庫",
     },
+    "sync_external_purchase_order": {
+        "module": "procurement",
+        "risk_level": "write",
+        "allowed_roles": ["admin", "warehouse"],
+        "description": "將已驗證的外部 ERP 採購單版本送審並同步",
+    },
 
     # ── 財務模組 ──────────────────────────────────────────────
     "get_ledger_summary": {

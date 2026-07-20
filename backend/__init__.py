@@ -31,6 +31,7 @@ from .procurement import (
     get_suppliers_list,
     get_purchase_orders_summary,
 )
+from .erp_exchange import sync_external_purchase_order
 from .finance import (
     get_ledger_summary,
     get_financial_overview,
@@ -70,6 +71,7 @@ tools_mapping = {
     "cancel_order": cancel_order,
     "get_receivables": get_receivables,
     "create_purchase_order": create_purchase_order,
+    "sync_external_purchase_order": sync_external_purchase_order,
     "get_payables": get_payables,
     "get_customers_list": get_customers_list,
     "get_suppliers_list": get_suppliers_list,
@@ -97,7 +99,8 @@ tools_mapping = {
 # 供 AI 多輪呼叫的完整工具列表（含公式計算）
 ALL_TOOLS = [
     check_inventory, get_all_inventory, get_low_stock_inventory, update_inventory, get_employee_info,
-    get_recent_orders, create_order, get_receivables, create_purchase_order, get_payables,
+    get_recent_orders, create_order, get_receivables, create_purchase_order,
+    sync_external_purchase_order, get_payables,
     get_customers_list, get_suppliers_list, get_quotations_summary,
     get_purchase_orders_summary, get_ledger_summary, get_cost_analysis,
     get_bom_list, get_work_orders_status, get_payroll_summary,

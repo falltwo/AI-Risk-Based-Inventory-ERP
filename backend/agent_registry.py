@@ -153,7 +153,7 @@ _FALLBACK_TOOLS: dict[str, list[str]] = {
     ],
     "procurement_agent": [
         "get_payables", "get_suppliers_list", "get_purchase_orders_summary",
-        "create_purchase_order",
+        "create_purchase_order", "sync_external_purchase_order",
     ],
     "sales_agent": [
         "get_recent_orders", "create_order", "get_receivables",
