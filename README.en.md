@@ -10,46 +10,39 @@
 > **v1.0 — A governed supply-chain AI decision loop**
 > AI makes judgments and proposals; humans retain execution authority. Protected AI/Gateway procurement writes can be approved, replayed, and traced.
 
-This project is a governance-first AI Agent ERP. It connects external supply-chain risk, internal procurement data, AI recommendations, human approval, and ERP execution into one verifiable workflow—rather than stopping at a chatbot or a risk dashboard.
+This project implements an AI Agent ERP with governance controls. It integrates external supply-chain risk, internal procurement data, AI-assisted proposals, human approval, and ERP execution.
 
 > [!IMPORTANT]
 > v1.0 is a competition and research proof of concept. Its deployment boundary is one SQLite database per organization. It does not provide shared-database row-level multi-tenancy, external IAM/SSO, or distributed transactions, and must not be treated as a production identity or authorization service on the public internet.
 
-## v1.0 at a glance
+## Functional tiers
 
-| Tier | Demo account | What it can do | What it cannot do |
+| Tier | Demo account | Provided capabilities | Restrictions |
 |---|---|---|---|
 | **L1 Risk Observer** | `viewer / viewer` | Risk KPIs, heatmap, alerts, read-only CSV mapping, notification preview | Cannot create proposals or modify ERP data |
 | **L2 Intelligence & Decision** | `planner / planner` | Impact analysis, What-if, alternative-supplier comparison, durable Proposal submission | Cannot approve or directly execute ERP writes |
 | **L3 Approval & Execution** | `approver / approver` | Review evidence, approve/reject, Gateway execution, audit timeline | Cannot approve its own proposal |
 
-### End-to-end decision flow
+### Procurement decision flow
 
-```mermaid
-flowchart LR
-    NEWS["External risk intelligence"] --> L1["L1 Observe<br/>alerts, map, read-only mapping"]
-    L1 --> L2["L2 Recommend<br/>What-if, supplier alternatives"]
-    L2 --> PROP["Durable Proposal<br/>source line, price, digest"]
-    PROP --> L3["L3 Approve / Reject<br/>human decision"]
-    L3 --> GATE["Tool Gateway<br/>authorization, CAS, transaction, idempotency"]
-    GATE --> ERP["ERP Effect<br/>purchase order + receipt + audit"]
-    L3 -. "not approved" .-> STOP["zero ERP writes"]
-```
+![Procurement decision flow](docs/images/governed_procurement_flow_en.drawio.png)
+
+[Editable draw.io source](docs/diagrams/governed_procurement_flow_en.drawio)
 
 ## v0.1 → v1.0
 
-v1.0 preserves the governance harness completed in v0.1 and turns it into an operable supply-chain decision product.
+v1.0 builds on the v0.1 governance harness by adding the L1→L2→L3 supply-chain decision workflow and tier-specific interfaces.
 
 | Area | v0.1 — Governance Harness Complete | v1.0 — Governed Decision Loop |
 |---|---|---|
 | Primary outcome | Closed governance bypasses across Web, LINE, and rollback paths | Connected the governance foundation into a complete L1→L2→L3 product flow |
-| AI honesty | Code-enforced pending/denied disclosure | Separate Proposal, Approval, and Execution objects keep UI and database state aligned |
-| Supply-chain UX | Intelligence, heatmap, affected records, and recommendations existed as separate capabilities | An affected procurement line can become a governed alternative-purchase Proposal |
+| AI state disclosure | Code-enforced pending/denied disclosure | Separate Proposal, Approval, and Execution objects keep UI and database state aligned |
+| Supply-chain workflow | Intelligence, heatmap, affected records, and recommendations existed as separate capabilities | An affected procurement line can become a governed alternative-purchase Proposal |
 | Human approval | Generic write approval with auditable state | L3 reviews source PO, supplier change, quantity, unit price, reason, and digest |
 | Execution safety | Gateway, hash-chain logs, and transaction baseline | Exact line/price identity, live revocation checks, one effect per source line, idempotent receipts |
 | Product tiers | Governance roles and capabilities | Three accounts with distinct views and least-privilege behavior |
 | Automated tests | 55 tests in the v0.1 release | **327 passing tests** in v1.0 release verification |
-| Documentation | Chinese README and architecture diagrams | Bilingual README, version comparison, honest limits, and English release notes |
+| Documentation | Chinese README and architecture diagrams | Bilingual README, version comparison, documented scope and limitations, and English release notes |
 
 The v0.1 column is based on the archived release record retained by the maintainer. The private archive is intentionally not linked from public documentation.
 
@@ -65,44 +58,11 @@ The v0.1 column is based on the archived release record retained by the maintain
 
 ## Architecture
 
-```mermaid
-flowchart TB
-    subgraph ENTRY["Entry and identity"]
-        WEB["Streamlit Web"]
-        LINE["LINE Bot"]
-        WEB_ACCESS["Web: Role + Membership + Entitlement"]
-        LINE_ACCESS["LINE: source allowlist + role policy"]
-    end
+![System architecture](docs/images/system_architecture_en.drawio.png)
 
-    subgraph AI["AI orchestration"]
-        ORCH["Orchestrator Agent"]
-        AGENTS["8 specialist Agents"]
-    end
-
-    subgraph GOV["Governance"]
-        REG["Tool Registry / Allowlist"]
-        GATE["Tool Gateway"]
-        APPROVAL["Proposal / Approval / Execution"]
-    end
-
-    subgraph DATA["Data and evidence"]
-        ERP["ERP Modules"]
-        DB["SQLite"]
-        AUDIT["Audit Logs + Receipts"]
-    end
-
-    WEB --> WEB_ACCESS
-    LINE --> LINE_ACCESS
-    WEB_ACCESS --> ORCH
-    LINE_ACCESS --> ORCH
-    ORCH --> AGENTS --> REG --> GATE --> APPROVAL --> ERP --> DB
-    GATE --> AUDIT
-    APPROVAL --> AUDIT
-```
+[Editable draw.io source](docs/diagrams/system_architecture_en.drawio)
 
 The governance claims above are scoped to the protected AI/Gateway procurement workflow. Existing manual Web ERP forms have role-based access controls, but not every manual write produces a Proposal, Approval, and execution receipt.
-
-Original diagrams: [system architecture PNG](docs/images/erp_current_clean_architecture.png) · [governance flow PNG](docs/images/erp_current_standard_flowchart.png)
 
 ## Quick start
 
