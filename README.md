@@ -6,6 +6,7 @@
 [![Release](https://img.shields.io/github/v/release/falltwo/AI-Risk-Based-Inventory-ERP?display_name=tag)](https://github.com/falltwo/AI-Risk-Based-Inventory-ERP/releases)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/UI-Streamlit-FF4B4B?logo=streamlit&logoColor=white)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 > **v1.0 — A governed supply-chain AI decision loop**
 > AI makes judgments and proposals; humans retain execution authority. Protected AI/Gateway procurement writes can be approved, replayed, and traced.
@@ -163,3 +164,7 @@ docs/                        architecture diagrams, runbooks, and release notes
 - [v0.1 English release notes](docs/releases/v0.1.md)
 
 Stack: Python 3.11 · Streamlit · SQLite · LiteLLM · FastAPI · LINE Messaging API · Plotly
+
+## License
+
+Released under the [MIT License](LICENSE).

@@ -6,6 +6,7 @@
 [![Release](https://img.shields.io/github/v/release/falltwo/AI-Risk-Based-Inventory-ERP?display_name=tag)](https://github.com/falltwo/AI-Risk-Based-Inventory-ERP/releases)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/UI-Streamlit-FF4B4B?logo=streamlit&logoColor=white)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 > **v1.0 — 可治理的供應鏈 AI 決策閉環**
 > AI 負責判斷與提案，人類保留執行權；受保護的 AI／Gateway 採購寫入可被審批、重放與追溯。
@@ -163,3 +164,7 @@ docs/                        架構圖、runbook 與 Release notes
 - [v0.1 English release notes](docs/releases/v0.1.md)
 
 技術組成：Python 3.11 · Streamlit · SQLite · LiteLLM · FastAPI · LINE Messaging API · Plotly
+
+## 授權
+
+本專案採用 [MIT License](LICENSE)。
