@@ -61,7 +61,7 @@ def create_purchase_order(
 
     executing_approval = conn.execute(
         """
-        SELECT 1 FROM pending_approvals
+        SELECT requester_username FROM pending_approvals
         WHERE operation_id = ?
           AND tool_name = 'create_purchase_order'
           AND status = 'executing'
@@ -73,6 +73,12 @@ def create_purchase_order(
         raise PermissionError(
             "create_purchase_order requires a matching executing approval"
         )
+    requester_username = str(executing_approval[0] or "").strip()
+    from backend.access_control import ERP_EXCHANGE_PROPOSE, load_principal
+
+    requester = load_principal(requester_username, conn=conn)
+    if requester is None or not requester.can(ERP_EXCHANGE_PROPOSE):
+        raise PermissionError("purchase order requester no longer has proposal access")
 
     if isinstance(note, str):
         note = note.strip()
@@ -88,6 +94,38 @@ def create_purchase_order(
     unit_price = float(unit_price)
     if not math.isfinite(unit_price) or unit_price < 0:
         raise ValueError("unit_price must be a non-negative finite number")
+
+    proposal_id = _internal.get("proposal_id")
+    if requester.role == "supply_planner" and proposal_id is None:
+        raise PermissionError("L2 purchase order execution requires a bound Proposal")
+    validated_proposal = None
+    if proposal_id is not None:
+        from backend.purchase_proposals import validate_purchase_proposal_execution
+
+        execution_args = {
+            "po_id": po_id,
+            "supplier_id": supplier_id,
+            "product_id": product_id,
+            "qty": qty,
+            "unit_price": unit_price,
+            "order_date": order_date,
+            "status": status,
+            "note": note,
+        }
+        execution_args.update(
+            {
+                key: value
+                for key, value in _internal.items()
+                if not str(key).startswith("_")
+            }
+        )
+        validated_proposal = validate_purchase_proposal_execution(
+            conn,
+            operation_id=operation_id,
+            proposal_id=str(proposal_id),
+            execution_args=execution_args,
+            requester_username=requester.username,
+        )
 
     supplier = conn.execute(
         "SELECT is_official FROM suppliers WHERE supplier_id = ?",
@@ -106,6 +144,19 @@ def create_purchase_order(
         raise ValueError(f"unknown product_id: {product_id}")
 
     total_amount = qty * unit_price
+    if validated_proposal is not None:
+        conn.execute(
+            """
+            INSERT INTO purchase_proposal_effects (
+                source_po_item_id, proposal_id, operation_id, created_at
+            ) VALUES (?, ?, ?, datetime('now', 'localtime'))
+            """,
+            (
+                validated_proposal.source_po_item_id,
+                validated_proposal.proposal_id,
+                operation_id,
+            ),
+        )
     conn.execute(
         """
         INSERT INTO purchase_orders (

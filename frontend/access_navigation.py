@@ -143,6 +143,7 @@ def clear_identity_session_state(state: MutableMapping[str, object]) -> None:
         if (
             key.startswith("erp_csv_")
             or key.startswith("po_")
+            or key.startswith("purchase_proposal_")
             or key.startswith("radio_")
         ):
             state.pop(key, None)

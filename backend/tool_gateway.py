@@ -437,6 +437,32 @@ class ToolGateway:
                 return GatewayResult(status="denied", message=msg)
             actor = principal.username
 
+            # The L2 planner role may create a PO only through a durable,
+            # canonical PurchaseProposal.  Admin/warehouse keep the existing
+            # manual protected-PO path for backward compatibility.
+            if tool_name == "create_purchase_order" and principal.role == "supply_planner":
+                proposal_id = str(args.get("proposal_id") or "").strip()
+                operation_id = str(operation_id or "").strip()
+                if not proposal_id:
+                    msg = "L2 採購建立必須綁定已保存的 Proposal。"
+                    _write_log(tool_name, args, role, msg, success=False)
+                    return GatewayResult(status="denied", message=msg)
+                try:
+                    from backend.purchase_proposals import (
+                        validate_purchase_proposal_gateway_request,
+                    )
+
+                    validate_purchase_proposal_gateway_request(
+                        operation_id=operation_id,
+                        proposal_id=proposal_id,
+                        execution_args=args,
+                        actor=actor,
+                    )
+                except (PermissionError, ValueError) as exc:
+                    msg = f"L2 採購提案驗證失敗：{exc}"
+                    _write_log(tool_name, args, role, msg, success=False)
+                    return GatewayResult(status="denied", message=msg)
+
         # Step 5：依風險等級決定行為
         risk_level = registry.get_risk_level(tool_name)
 
@@ -892,6 +918,27 @@ class ToolGateway:
                         status="error", message="審批內容完整性驗證失敗，操作未執行。"
                     )
 
+                if expected_tool == "create_purchase_order":
+                    proposal_id = str(args.get("proposal_id") or "").strip()
+                    if str(operation_id).startswith("proposal:create-po:"):
+                        if not proposal_id:
+                            return GatewayResult(
+                                status="denied",
+                                message="採購提案審批缺少 Proposal 綁定。",
+                            )
+                        try:
+                            from backend.purchase_proposals import (
+                                validate_purchase_proposal_decision_scope,
+                            )
+
+                            validate_purchase_proposal_decision_scope(
+                                conn,
+                                proposal_id=proposal_id,
+                                actor=approver_username,
+                            )
+                        except (PermissionError, ValueError) as exc:
+                            return GatewayResult(status="denied", message=str(exc))
+
                 receipt = conn.execute(
                     """
                     SELECT result, approval_id, payload_digest
@@ -1120,7 +1167,7 @@ class ToolGateway:
                 row = conn.execute(
                     """
                     SELECT tool_name, parameters, requester, status, version,
-                           requester_username
+                           requester_username, operation_id
                     FROM pending_approvals WHERE approval_id = ?
                     """,
                     (approval_id,),
@@ -1164,6 +1211,37 @@ class ToolGateway:
                         status="error",
                         message=f"該審批項目的狀態為 {row[3]}，無法拒絕。",
                     )
+                try:
+                    args = json.loads(row[1])
+                except (TypeError, json.JSONDecodeError):
+                    return GatewayResult(
+                        status="error", message="審批參數格式已損壞，無法拒絕。"
+                    )
+                if not isinstance(args, dict):
+                    return GatewayResult(
+                        status="error", message="審批參數格式不合法，無法拒絕。"
+                    )
+                proposal_id = str(args.get("proposal_id") or "").strip()
+                if row[0] == "create_purchase_order" and str(row[6] or "").startswith(
+                    "proposal:create-po:"
+                ):
+                    if not proposal_id:
+                        return GatewayResult(
+                            status="denied",
+                            message="採購提案審批缺少 Proposal 綁定。",
+                        )
+                    try:
+                        from backend.purchase_proposals import (
+                            validate_purchase_proposal_decision_scope,
+                        )
+
+                        validate_purchase_proposal_decision_scope(
+                            conn,
+                            proposal_id=proposal_id,
+                            actor=approver_username,
+                        )
+                    except (PermissionError, ValueError) as exc:
+                        return GatewayResult(status="denied", message=str(exc))
                 recorded_reason = (
                     f"[legacy originator unavailable] {reason}"
                     if legacy_originator_missing
@@ -1180,7 +1258,6 @@ class ToolGateway:
                     approval_context=_PROTECTED_APPROVAL_CONTEXT,
                 ):
                     raise RuntimeError("審批狀態競態，拒絕未生效。")
-                args = json.loads(row[1])
                 msg = (
                     f"操作遭管理者「{approver_username}」拒絕，原因：{recorded_reason}。"
                     "該工具執行已作廢。"

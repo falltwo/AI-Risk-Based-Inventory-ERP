@@ -435,7 +435,7 @@ def test_po_tool_is_registered_as_governed_write_and_hidden_from_line():
     assert info == {
         "module": "procurement",
         "risk_level": "write",
-        "allowed_roles": ["admin", "warehouse"],
+        "allowed_roles": ["admin", "warehouse", "supply_planner"],
         "description": info["description"],
     }
     assert callable(tools_mapping["create_purchase_order"])

@@ -178,7 +178,7 @@ def test_tier_pages_derive_sections_from_live_principal():
 
     assert "principal = load_principal(username)" in risk_source
     assert "sections = risk_sections(principal)" in risk_source
-    assert risk_source.count("actor=principal.username") == 4
+    assert risk_source.count("actor=principal.username") == 5
     assert "principal = load_principal(username)" in exchange_source
     assert "sections = exchange_sections(principal)" in exchange_source
     assert "actor=current_actor" in exchange_source

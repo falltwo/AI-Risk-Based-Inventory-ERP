@@ -11,6 +11,7 @@ from frontend.access_navigation import risk_sections
 from frontend.components.supply_map import render_supply_chain_map, render_what_if_analysis
 from frontend.components.risk_dashboard import render_intelligence_gathering, render_response_execution
 from frontend.components.risk_overview import render_risk_overview
+from frontend.components.purchase_proposal_workbench import render_purchase_proposal_workbench
 
 def render(
     sub_menu: str,
@@ -84,4 +85,9 @@ def render(
                 gemini_model=gemini_model,
                 actor=principal.username,
             )
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("---")
+            st.markdown("### 🧾 步驟 5: 建立受治理的替代採購提案")
+            render_purchase_proposal_workbench(actor=principal.username)
 
