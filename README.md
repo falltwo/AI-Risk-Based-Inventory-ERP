@@ -10,48 +10,41 @@
 > **v1.0 — 可治理的供應鏈 AI 決策閉環**
 > AI 負責判斷與提案，人類保留執行權；受保護的 AI／Gateway 採購寫入可被審批、重放與追溯。
 
-本專案是一套治理優先的 AI Agent 進銷存系統。它把外部供應鏈風險、企業採購資料、AI 決策提案與 ERP 執行接成一條可驗證的流程，而不是只做聊天機器人或風險儀表板。
+本專案實作一套具治理控制的 AI Agent 進銷存系統，整合外部供應鏈風險、企業採購資料、AI 決策提案、人工核准與 ERP 執行。
 
 > [!IMPORTANT]
 > 本版本是競賽與研究型 PoC。它採「一個 SQLite 資料庫對應一個組織」的部署邊界，尚未提供共享資料庫的多租戶隔離、外部 IAM/SSO 或跨系統分散式交易，因此不得直接當成公開網路服務的正式身分與授權系統。
 
-## v1.0 一眼看懂
+## 功能層級
 
-| 層級 | Demo 帳號 | 能做什麼 | 明確不能做什麼 |
+| 層級 | Demo 帳號 | 提供功能 | 限制 |
 |---|---|---|---|
 | **L1 風險觀測** | `viewer / viewer` | 風險 KPI、熱圖、最新告警、唯讀 CSV 對映與通知預覽 | 不建立提案、不修改 ERP |
 | **L2 情報與決策** | `planner / planner` | 影響分析、What-if、替代供應商比較、建立不可變 Proposal 並送審 | 不核准、不直接執行 ERP 寫入 |
 | **L3 核准與執行** | `approver / approver` | 檢視核准證據、核准／拒絕、Gateway 執行、稽核時間線 | 不能核准自己的提案 |
 
-### 完整決策鏈
+### 採購決策流程
 
-```mermaid
-flowchart LR
-    NEWS["外部風險情資"] --> L1["L1 Observe<br/>告警、熱圖、唯讀對映"]
-    L1 --> L2["L2 Recommend<br/>What-if、替代供應商"]
-    L2 --> PROP["Durable Proposal<br/>來源明細、價格、digest"]
-    PROP --> L3["L3 Approve / Reject<br/>人工決策"]
-    L3 --> GATE["Tool Gateway<br/>權限、CAS、交易、冪等"]
-    GATE --> ERP["ERP Effect<br/>採購單 + receipt + audit"]
-    L3 -. "未核准" .-> STOP["零 ERP 寫入"]
-```
+![採購決策流程](docs/images/governed_procurement_flow_zh.drawio.png)
+
+[draw.io 可編輯原檔](docs/diagrams/governed_procurement_flow_zh.drawio)
 
 ## v0.1 → v1.0
 
-v1.0 延續 v0.1 已完成的治理 harness，將它推進成可展示、可操作的供應鏈決策產品。
+v1.0 在 v0.1 治理 harness 基礎上，加入 L1→L2→L3 供應鏈決策流程與分層操作介面。
 
 | 面向 | v0.1 — Governance Harness Complete | v1.0 — Governed Decision Loop |
 |---|---|---|
 | 核心成果 | 關閉 Web、LINE、rollback 等治理旁路 | 將治理底座接成 L1→L2→L3 完整產品流程 |
-| AI 誠實性 | 由程式強制揭露 pending／denied，不依賴 prompt | Proposal、Approval、Execution 分離，畫面與資料庫狀態一致 |
-| 供應鏈體驗 | 情資、熱圖、受影響單據與建議各自存在 | 受影響採購明細可直接形成替代採購 Proposal |
+| AI 狀態揭露 | 由程式強制揭露 pending／denied，不依賴 prompt | Proposal、Approval、Execution 分離，畫面與資料庫狀態一致 |
+| 供應鏈流程 | 情資、熱圖、受影響單據與建議各自存在 | 受影響採購明細可直接形成替代採購 Proposal |
 | 人工核准 | 通用寫入審批與可稽核狀態 | L3 顯示來源單據、供應商變更、數量、單價、理由與 digest |
 | 執行安全 | Gateway、hash-chain log、transaction baseline | exact line/price identity、即時撤權檢查、同來源明細唯一 effect、冪等 receipt |
 | 產品分層 | 角色與治理能力為主要重點 | 三個獨立帳號、三種可見功能與最小權限 |
-| 自動化測試 | 55 tests（v0.1 release） | **327 passing tests**（v1.0 release verification） |
-| 文件 | 中文 README 與架構圖 | 雙語 README、版本比較、誠實邊界與 v1.0 Release notes |
+| 自動化測試 | **56 passing tests**（公開快照驗證） | **327 passing tests**（v1.0 release verification） |
+| 文件 | 中文 README 與架構圖 | 雙語 README、版本比較、適用範圍與限制、v1.0 Release notes |
 
-v0.1 欄位根據維護者保留的封存 Release 紀錄整理；私有封存庫不列入公開文件連結。
+v0.1 欄位依公開 repo 的初始乾淨快照整理；先前內部開發歷史不列入公開文件連結。
 
 ## 治理與安全設計
 
@@ -65,44 +58,11 @@ v0.1 欄位根據維護者保留的封存 Release 紀錄整理；私有封存庫
 
 ## 系統架構
 
-```mermaid
-flowchart TB
-    subgraph ENTRY["入口與身分"]
-        WEB["Streamlit Web"]
-        LINE["LINE Bot"]
-        WEB_ACCESS["Web: Role + Membership + Entitlement"]
-        LINE_ACCESS["LINE: source allowlist + role policy"]
-    end
+![系統架構](docs/images/system_architecture_zh.drawio.png)
 
-    subgraph AI["AI 編排"]
-        ORCH["總管 Agent"]
-        AGENTS["8 個專責 Agent"]
-    end
-
-    subgraph GOV["治理層"]
-        REG["Tool Registry / Allowlist"]
-        GATE["Tool Gateway"]
-        APPROVAL["Proposal / Approval / Execution"]
-    end
-
-    subgraph DATA["資料與證據"]
-        ERP["ERP Modules"]
-        DB["SQLite"]
-        AUDIT["Audit Logs + Receipts"]
-    end
-
-    WEB --> WEB_ACCESS
-    LINE --> LINE_ACCESS
-    WEB_ACCESS --> ORCH
-    LINE_ACCESS --> ORCH
-    ORCH --> AGENTS --> REG --> GATE --> APPROVAL --> ERP --> DB
-    GATE --> AUDIT
-    APPROVAL --> AUDIT
-```
+[draw.io 可編輯原檔](docs/diagrams/system_architecture_zh.drawio)
 
 治理宣稱的邊界是上圖中的受保護 AI／Gateway 採購流程。現有手動 Web ERP 表單另有角色權限控制，但並非每個手動寫入都會產生 Proposal、Approval 與 execution receipt。
-
-原始架構圖：[系統架構 PNG](docs/images/erp_current_clean_architecture.png) · [治理流程 PNG](docs/images/erp_current_standard_flowchart.png)
 
 ## 快速開始
 
@@ -198,6 +158,8 @@ docs/                        架構圖、runbook 與 Release notes
 ## 版本
 
 - [v1.0 Releases](https://github.com/falltwo/AI-Risk-Based-Inventory-ERP/releases)
+- [v0.1 Release](https://github.com/falltwo/AI-Risk-Based-Inventory-ERP/releases/tag/v0.1)
 - [v1.0 English release notes](docs/releases/v1.0.md)
+- [v0.1 English release notes](docs/releases/v0.1.md)
 
 技術組成：Python 3.11 · Streamlit · SQLite · LiteLLM · FastAPI · LINE Messaging API · Plotly
