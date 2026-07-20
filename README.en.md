@@ -41,10 +41,10 @@ v1.0 builds on the v0.1 governance harness by adding the L1→L2→L3 supply-cha
 | Human approval | Generic write approval with auditable state | L3 reviews source PO, supplier change, quantity, unit price, reason, and digest |
 | Execution safety | Gateway, hash-chain logs, and transaction baseline | Exact line/price identity, live revocation checks, one effect per source line, idempotent receipts |
 | Product tiers | Governance roles and capabilities | Three accounts with distinct views and least-privilege behavior |
-| Automated tests | 55 tests in the v0.1 release | **327 passing tests** in v1.0 release verification |
+| Automated tests | **56 passing tests** on the public snapshot | **327 passing tests** in v1.0 release verification |
 | Documentation | Chinese README and architecture diagrams | Bilingual README, version comparison, documented scope and limitations, and English release notes |
 
-The v0.1 column is based on the archived release record retained by the maintainer. The private archive is intentionally not linked from public documentation.
+The v0.1 column is based on the initial cleaned snapshot in this public repository. Earlier internal development history is intentionally not linked from public documentation.
 
 ## Governance and security design
 
@@ -158,6 +158,8 @@ docs/                        architecture diagrams, runbooks, and release notes
 ## Versions
 
 - [v1.0 Releases](https://github.com/falltwo/AI-Risk-Based-Inventory-ERP/releases)
+- [v0.1 Release](https://github.com/falltwo/AI-Risk-Based-Inventory-ERP/releases/tag/v0.1)
 - [v1.0 English release notes](docs/releases/v1.0.md)
+- [v0.1 English release notes](docs/releases/v0.1.md)
 
 Stack: Python 3.11 · Streamlit · SQLite · LiteLLM · FastAPI · LINE Messaging API · Plotly
