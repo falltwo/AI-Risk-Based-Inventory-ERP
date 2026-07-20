@@ -131,7 +131,7 @@ TOOL_CLASSIFICATION = {
     "sync_external_purchase_order": {
         "module": "procurement",
         "risk_level": "write",
-        "allowed_roles": ["admin", "warehouse"],
+        "allowed_roles": ["admin", "warehouse", "supply_planner"],
         "description": "將已驗證的外部 ERP 採購單版本送審並同步",
     },
 

@@ -35,9 +35,11 @@ def _call_is_guarded_by_button(tree: ast.AST, function_name: str) -> bool:
 
 def test_procurement_menu_routes_to_erp_csv_exchange_page():
     app_source = _source("app.py")
+    navigation_source = _source("frontend/access_navigation.py")
     procurement_source = _source("frontend/page_procurement.py")
 
-    assert '"ERP CSV 交換"' in app_source
+    assert "build_menu_structure(principal)" in app_source
+    assert '"ERP CSV 交換"' in navigation_source
     assert '"ERP CSV 交換"' in procurement_source
     assert "page_erp_csv_exchange" in procurement_source
 
@@ -50,10 +52,11 @@ def test_logout_clears_all_erp_csv_session_keys():
         if isinstance(node, ast.FunctionDef) and node.name == "logout"
     )
     normalized = ast.dump(logout)
+    navigation_source = _source("frontend/access_navigation.py")
 
-    assert "erp_csv_" in normalized
-    assert "startswith" in normalized
-    assert "Delete" in normalized
+    assert "clear_identity_session_state" in normalized
+    assert 'key.startswith("erp_csv_")' in navigation_source
+    assert "state.pop(key, None)" in navigation_source
 
 
 def test_csv_writes_and_receipt_reconciliation_require_explicit_buttons():

@@ -404,6 +404,7 @@ def execute_tool_call(
     role: str,
     agent_id: str = "",
     *,
+    actor: str | None = None,
     operation_id: str | None = None,
 ) -> dict:
     """經 A 的 Tool Gateway 執行單一工具呼叫（治理鏈在此）。可離線測。
@@ -412,6 +413,7 @@ def execute_tool_call(
         tool_name,
         args or {},
         role,
+        actor=actor,
         agent_name=agent_id,
         operation_id=operation_id,
     )
@@ -429,7 +431,7 @@ def execute_tool_call(
 # ════════════════════════════════════════════════════════════════════════
 def run_agent(agent_id: str, task: str, role: str,
               model=None, api_key=None, api_base=None, max_turns: int = 6,
-              history: list | None = None) -> dict:
+              history: list | None = None, actor: str | None = None) -> dict:
     """
     讓指定專責 Agent 處理任務：LLM 推理 → 讀 tool_calls → 交 gateway 執行 → 回灌 → 再推理。
     history：近期對話（sliding window，_trim_history 整理後夾在 system 與本輪任務之間）。
@@ -476,6 +478,7 @@ def run_agent(agent_id: str, task: str, role: str,
                 args,
                 role,
                 agent_id=agent_id,
+                actor=actor,
                 operation_id=f"agent:{tc.id}",
             )
             tool_calls_made.append({"tool": tc.function.name, "args": args,
@@ -514,7 +517,7 @@ def run_agent(agent_id: str, task: str, role: str,
 # ════════════════════════════════════════════════════════════════════════
 def orchestrate(task: str, role: str = "admin",
                 model=None, api_key=None, api_base=None, use_llm: bool = True,
-                history: list | None = None) -> dict:
+                history: list | None = None, actor: str | None = None) -> dict:
     """
     端到端入口：判斷派工 → 執行 → 彙整。
     模型由 model（LiteLLM 格式字串）決定，預設 LLM_MODEL；api_key/api_base 可覆蓋。
@@ -541,7 +544,7 @@ def orchestrate(task: str, role: str = "admin",
 
     try:
         results = [run_agent(aid, task, role, model=model, api_key=api_key, api_base=api_base,
-                             history=hist)
+                             history=hist, actor=actor)
                    for aid in chain]
     except Exception as e:
         name = (get_agent(routing["primary_agent"]) or {}).get("name_zh", routing["primary_agent"])

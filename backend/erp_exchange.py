@@ -21,6 +21,14 @@ import sqlite3
 from typing import Iterable
 
 from . import database
+from .access_control import (
+    ERP_EXCHANGE_EXPORT,
+    ERP_EXCHANGE_PROPOSE,
+    ERP_EXCHANGE_RECONCILE,
+    PROPOSAL_EVIDENCE_READ,
+    require_any_capability,
+    require_capability,
+)
 
 
 MAX_IMPORT_BYTES = 1_000_000
@@ -64,7 +72,7 @@ EXPORT_COLUMNS = (
     "status",
     "note",
 )
-ERP_EXCHANGE_POLICY_VERSION = "external-po-sync-v1"
+ERP_EXCHANGE_POLICY_VERSION = "external-po-sync-v2"
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _SOURCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -213,7 +221,9 @@ def _load_known_ids(conn, table: str, id_column: str, ids: set[str]) -> dict:
     return {row[id_column]: row for row in rows}
 
 
-def stage_purchase_order_rows(source_system: str, rows: Iterable[dict]) -> dict:
+def stage_purchase_order_rows(
+    source_system: str, rows: Iterable[dict], *, actor: str
+) -> dict:
     """Atomically stage a fully valid batch; invalid batches write nothing."""
     source_system = normalize_source_system(source_system)
     normalized = [_normalize_row(row) for row in rows]
@@ -232,6 +242,7 @@ def stage_purchase_order_rows(source_system: str, rows: Iterable[dict]) -> dict:
     summary = {"inserted": 0, "updated": 0, "unchanged": 0, "records": []}
     with database.transaction(immediate=True) as conn:
         conn.row_factory = sqlite3.Row
+        _require_exchange_actor(actor, conn, ERP_EXCHANGE_PROPOSE)
         suppliers = _load_known_ids(
             conn, "suppliers", "supplier_id", {row["supplier_id"] for row in normalized}
         )
@@ -494,7 +505,9 @@ def _with_sync_state(record: dict, *, conn=None) -> dict:
     return record
 
 
-def list_exchange_records(source_system: str | None = None) -> list[dict]:
+def list_exchange_records(
+    source_system: str | None = None, *, actor: str
+) -> list[dict]:
     params: tuple = ()
     where = ""
     if source_system is not None:
@@ -503,6 +516,12 @@ def list_exchange_records(source_system: str | None = None) -> list[dict]:
         params = (source_system,)
     with sqlite3.connect(database.DB_FILE) as conn:
         conn.row_factory = sqlite3.Row
+        actor = _clean_text(actor, "actor", required=True, max_length=128)
+        require_any_capability(
+            actor,
+            {ERP_EXCHANGE_PROPOSE, PROPOSAL_EVIDENCE_READ},
+            conn=conn,
+        )
         rows = conn.execute(
             f"""
             SELECT e.*, s.country AS supplier_country,
@@ -697,14 +716,11 @@ def sync_external_purchase_order(
     }
 
 
-def _require_exchange_actor(actor: str, conn: sqlite3.Connection) -> str:
+def _require_exchange_actor(
+    actor: str, conn: sqlite3.Connection, capability: str
+) -> str:
     actor = _clean_text(actor, "actor", required=True, max_length=128)
-    role_row = conn.execute(
-        "SELECT role FROM users WHERE username = ?", (actor,)
-    ).fetchone()
-    role = role_row[0] if role_row else None
-    if role not in {"admin", "warehouse"}:
-        raise PermissionError("目前使用者沒有 ERP CSV 匯出或回執對帳權限")
+    require_capability(actor, capability, conn=conn)
     return actor
 
 
@@ -888,6 +904,7 @@ def _validated_action_snapshot(row: sqlite3.Row) -> dict:
         args=parameters,
         resource_version=resource_version,
         policy_version=row["policy_version"],
+        requester_username=row["requester_username"],
     )
     if not hmac.compare_digest(row["payload_digest"], expected_payload_digest):
         raise ValueError("核准內容摘要驗證失敗，拒絕匯出或對帳")
@@ -913,11 +930,12 @@ def _approved_action_rows(
     )
     with sqlite3.connect(database.DB_FILE) as conn:
         conn.row_factory = sqlite3.Row
-        _require_exchange_actor(actor, conn)
+        _require_exchange_actor(actor, conn, ERP_EXCHANGE_EXPORT)
         rows = conn.execute(
             """
             SELECT p.operation_id, p.approval_id, p.payload_digest,
                    p.parameters, p.resource_version, p.policy_version,
+                   p.requester_username,
                    local_receipt.result
             FROM pending_approvals p
             JOIN effect_receipts local_receipt
@@ -1062,7 +1080,7 @@ def reconcile_receipt_csv(content: bytes, *, actor: str) -> dict:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with database.transaction(immediate=True) as conn:
         conn.row_factory = sqlite3.Row
-        actor = _require_exchange_actor(actor, conn)
+        actor = _require_exchange_actor(actor, conn, ERP_EXCHANGE_RECONCILE)
         expected_key_id, secret = _receipt_verification_config()
         rows = _parse_receipt_rows(content)
         for row in rows:
@@ -1076,6 +1094,7 @@ def reconcile_receipt_csv(content: bytes, *, actor: str) -> dict:
                 """
                 SELECT p.operation_id, p.approval_id, p.payload_digest,
                        p.parameters, p.resource_version, p.policy_version,
+                       p.requester_username,
                        p.status, local_receipt.result
                 FROM pending_approvals p
                 JOIN effect_receipts local_receipt
@@ -1252,7 +1271,7 @@ def list_exchange_receipts(
     )
     with sqlite3.connect(database.DB_FILE) as conn:
         conn.row_factory = sqlite3.Row
-        _require_exchange_actor(actor, conn)
+        _require_exchange_actor(actor, conn, ERP_EXCHANGE_RECONCILE)
         rows = conn.execute(
             """
             SELECT r.*,

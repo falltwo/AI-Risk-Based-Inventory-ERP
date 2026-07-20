@@ -18,3 +18,5 @@ if _ROOT not in sys.path:
 # 2) 測試專用 DB 路徑（模組載入期設定，早於任何 backend import）
 _TMP_DIR = tempfile.mkdtemp(prefix="erp_test_")
 os.environ["ERP_DB_PATH"] = os.path.join(_TMP_DIR, "test_erp.db")
+# 測試套件明確啟用合成資料；正式執行的安全預設維持關閉。
+os.environ["ERP_DEMO_MODE"] = "1"

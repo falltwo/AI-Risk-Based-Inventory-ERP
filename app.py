@@ -15,6 +15,15 @@ except Exception:
     pass
 
 from backend import init_db, check_login
+from backend.database import is_demo_mode_enabled
+from backend.access_control import load_principal
+from frontend.access_navigation import (
+    ROLE_NAMES,
+    build_menu_structure,
+    clear_identity_session_state,
+    effective_product_levels,
+    normalize_navigation_state,
+)
 
 # ── 初始化資料庫 ────────────────────────────────────────────────────
 init_db()
@@ -142,7 +151,17 @@ if not st.session_state.logged_in:
     )
     col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
-        st.info("💡 **測試帳號 / 密碼**：\n- 店長：`admin / admin`\n- 倉管：`wh1 / wh1`\n- 業務：`sales1 / sales1`\n- 人資：`hr1 / hr1`")
+        if is_demo_mode_enabled():
+            st.info(
+                "💡 **分層 Demo 帳號 / 密碼**：\n"
+                "- L1 風險觀測：`viewer / viewer`\n"
+                "- L2 決策規劃：`planner / planner`\n"
+                "- L3 核准執行：`approver / approver`\n\n"
+                "**既有測試帳號**：`admin / admin`、`wh1 / wh1`、"
+                "`sales1 / sales1`、`hr1 / hr1`"
+            )
+        else:
+            st.info("請使用已由系統管理者配置的帳號登入。")
         with st.form("login_form"):
             username = st.text_input("使用者帳號")
             password = st.text_input("密碼", type="password")
@@ -161,15 +180,18 @@ if not st.session_state.logged_in:
 
 # ── 登出 ────────────────────────────────────────────────────────────
 def logout():
-    st.session_state.logged_in = False
-    st.session_state.menu_selection = "📊 營運分析看板"
-    st.session_state.sub_menu = None
-    for key in list(st.session_state.keys()):
-        if key.startswith("erp_csv_"):
-            del st.session_state[key]
-    if "messages" in st.session_state:
-        st.session_state.messages = []
+    clear_identity_session_state(st.session_state)
     st.rerun()
+
+
+# 每次 Streamlit rerun 都從資料庫重新解析身分、角色與有效 entitlement。
+principal = load_principal(st.session_state.get("username", ""))
+if principal is None:
+    clear_identity_session_state(st.session_state)
+    st.error("登入身分已失效，請重新登入。")
+    st.rerun()
+st.session_state.role = principal.role
+st.session_state.name = principal.name
 
 # ── CSS 選單優化 ───────────────────────────────────────────────────
 st.markdown("""
@@ -199,10 +221,12 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── 側邊欄導覽 (樹狀結構) ──────────────────────────────────────────
-role_names = {"admin": "系統管理員", "warehouse": "倉管部", "hr": "人資部", "sales": "業務部"}
+role_names = ROLE_NAMES
 
-st.sidebar.title(f"🛡️ {st.session_state.name}")
-st.sidebar.markdown(f"**身分**: `{role_names.get(st.session_state.role, '未知')}`")
+st.sidebar.title(f"🛡️ {principal.name}")
+st.sidebar.markdown(f"**身分**: `{role_names.get(principal.role, '未知')}`")
+levels = effective_product_levels(principal)
+st.sidebar.markdown(f"**有效產品層級**: `{' / '.join(levels) if levels else '無'}`")
 
 # ── 模型/金鑰設定（issue #27）：全部由 .env 驅動，側邊欄不再輸入 API Key ──
 #    LLM_MODEL / LLM_FALLBACK_MODELS / LLM_ANALYSIS_MODEL / GNEWS_API_KEY
@@ -219,35 +243,14 @@ if st.sidebar.button("🔓 登出系統", use_container_width=True):
 st.sidebar.markdown("---")
 st.sidebar.markdown("## 📋 導航選單")
 
-# 定義所有選單結構
-FULL_MENU = {
-    "📊 營運分析看板": [],
-    "🤖 AI 智能助理": ["對話介面", "LINE 客服記錄", "Agent Dashboard"],
-    "📦 進銷存": ["商品管理", "庫存數量", "入庫/出庫", "條碼掃描", "倉庫管理"],
-    "🛒 採購管理": ["採購單", "供應商管理", "進貨成本", "採購歷史", "ERP CSV 交換"],
-    "💰 銷售管理": ["報價單", "銷售單", "客戶消費視覺化", "客戶個人消費分析", "收款管理"],
-    "📒 財務會計": ["應收/應付", "總帳", "成本分析", "財報"],
-    "👥 人資": ["員工資料", "薪資", "出勤"],
-    "🌿 碳排放管理": ["碳排放總覽", "碳足跡追蹤", "減量目標", "年度碳目標分析", "ESG 報告","供應商風險與碳排"],
-    "🌱 供應鏈與風險": []
-}
+# 導覽只使用本次 rerun 從資料庫取得的有效 principal。
+MENU_STRUCTURE = build_menu_structure(principal)
+if not MENU_STRUCTURE:
+    st.error("此帳號目前沒有可用的產品權限，請聯絡管理員。")
+    st.stop()
 
-# 角色權限對照表
-ROLE_PERMISSIONS = {
-    "admin": list(FULL_MENU.keys()),
-    "warehouse": ["📊 營運分析看板", "🤖 AI 智能助理", "📦 進銷存", "🛒 採購管理", "🌱 供應鏈與風險"],
-    "sales": ["📊 營運分析看板", "🤖 AI 智能助理", "💰 銷售管理", "🌿 碳排放管理"],
-    "hr": ["📊 營運分析看板", "🤖 AI 智能助理", "👥 人資"]
-}
-
-# 根據目前角色過濾出的選單
-allowed_menus = ROLE_PERMISSIONS.get(st.session_state.role, ["📊 營運分析看板"])
-MENU_STRUCTURE = {k: v for k, v in FULL_MENU.items() if k in allowed_menus}
-
-# 若目前選中的主選單不在權限內，強制跳回第一個
-if st.session_state.menu_selection not in MENU_STRUCTURE:
-    st.session_state.menu_selection = list(MENU_STRUCTURE.keys())[0]
-    st.session_state.sub_menu = MENU_STRUCTURE[st.session_state.menu_selection][0] if MENU_STRUCTURE[st.session_state.menu_selection] else None
+# 角色或 entitlement 變更後，立即清除不再有效的主／子選單狀態。
+normalize_navigation_state(st.session_state, MENU_STRUCTURE)
 
 for main_item, subs in MENU_STRUCTURE.items():
     is_active = (st.session_state.menu_selection == main_item)
@@ -309,7 +312,7 @@ elif menu_selection == "🤖 AI 智能助理":
         render_line_logs()
     elif sub_menu == "Agent Dashboard":
         from frontend.page_agent_dashboard import render as render_agent_dashboard
-        render_agent_dashboard()
+        render_agent_dashboard(username=principal.username)
     else:
         render_ai(api_key=api_key, role_names=role_names)
 
@@ -317,7 +320,7 @@ elif menu_selection == "📦 進銷存":
     render_inventory(sub_menu=sub_menu)
 
 elif menu_selection == "🛒 採購管理":
-    render_procurement(sub_menu=sub_menu)
+    render_procurement(sub_menu=sub_menu, username=principal.username)
 
 elif menu_selection == "💰 銷售管理":
     render_sales(sub_menu=sub_menu , api_key=api_key)
@@ -332,4 +335,10 @@ elif menu_selection == "🌿 碳排放管理":
     render_carbon(sub_menu=sub_menu, api_key=api_key)
 
 elif menu_selection == "🌱 供應鏈與風險":
-    render_supply_chain_risk(sub_menu=sub_menu, api_key=api_key, gnews_api_key=gnews_api_key or "", gemini_model=gemini_model)
+    render_supply_chain_risk(
+        sub_menu=sub_menu,
+        api_key=api_key,
+        gnews_api_key=gnews_api_key or "",
+        gemini_model=gemini_model,
+        username=principal.username,
+    )

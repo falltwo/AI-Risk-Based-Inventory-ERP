@@ -22,7 +22,7 @@ from backend import tools_mapping
 from backend.erp_exchange import ERP_EXCHANGE_POLICY_VERSION
 
 
-PO_APPROVAL_POLICY_VERSION = "po-approval-v1"
+PO_APPROVAL_POLICY_VERSION = "po-approval-v2"
 
 
 def canonical_payload_digest(
@@ -31,6 +31,7 @@ def canonical_payload_digest(
     args: dict,
     resource_version: str,
     policy_version: str,
+    requester_username: str | None = None,
 ) -> str:
     """Return a stable digest of the exact action that a person will approve."""
     target = (args or {}).get("po_id")
@@ -45,6 +46,7 @@ def canonical_payload_digest(
         "parameters": args or {},
         "resource_version": resource_version,
         "policy_version": policy_version,
+        "requester_username": str(requester_username or "").strip() or None,
     }
     canonical = json.dumps(
         payload,
@@ -111,6 +113,7 @@ def _create_pending_approval(
     args: dict,
     role: str,
     *,
+    requester_username: str | None = None,
     operation_id: str | None = None,
     resource_version: str = "unspecified",
     policy_version: str = PO_APPROVAL_POLICY_VERSION,
@@ -126,6 +129,7 @@ def _create_pending_approval(
         tool_name,
         args,
         role,
+        requester_username=requester_username,
         operation_id=operation_id,
         resource_version=resource_version,
         policy_version=policy_version,
@@ -144,6 +148,7 @@ def _replay_protected_operation(
     expected_tool: str,
     expected_resource_version: str,
     expected_policy_version: str,
+    requester_username: str | None = None,
 ) -> "GatewayResult | None":
     """Return the durable state for an existing protected operation."""
     from backend.database import run_query
@@ -151,7 +156,7 @@ def _replay_protected_operation(
     rows = run_query(
         """
         SELECT approval_id, tool_name, status, payload_digest,
-               resource_version, policy_version
+               resource_version, policy_version, requester_username
         FROM pending_approvals
         WHERE operation_id = ?
         """,
@@ -167,6 +172,7 @@ def _replay_protected_operation(
         stored_digest,
         resource_version,
         policy_version,
+        stored_requester_username,
     ) = rows[0]
     if (
         tool_name != expected_tool
@@ -180,11 +186,25 @@ def _replay_protected_operation(
             approval_id=approval_id,
         )
 
+    submitted_requester = str(requester_username or "").strip()
+    stored_requester = str(stored_requester_username or "").strip()
+    if (
+        not submitted_requester
+        or not stored_requester
+        or not hmac.compare_digest(submitted_requester, stored_requester)
+    ):
+        return GatewayResult(
+            status="denied",
+            message="operation_id 已綁定其他提案人，拒絕重放。",
+            approval_id=approval_id,
+        )
+
     submitted_digest = canonical_payload_digest(
         tool_name=tool_name,
         args=args,
         resource_version=resource_version,
         policy_version=policy_version,
+        requester_username=stored_requester,
     )
     if not hmac.compare_digest(stored_digest, submitted_digest):
         return GatewayResult(
@@ -239,7 +259,7 @@ def _replay_protected_operation(
 
 
 def _replay_purchase_order_operation(
-    operation_id: str, args: dict
+    operation_id: str, args: dict, *, requester_username: str | None = None
 ) -> "GatewayResult | None":
     """Backward-compatible wrapper for protected PO creation replay."""
     return _replay_protected_operation(
@@ -248,6 +268,7 @@ def _replay_purchase_order_operation(
         expected_tool="create_purchase_order",
         expected_resource_version="absent",
         expected_policy_version=PO_APPROVAL_POLICY_VERSION,
+        requester_username=requester_username,
     )
 
 
@@ -257,6 +278,7 @@ def _replay_protected_operation_from_storage(
     *,
     expected_tool: str,
     expected_policy_version: str,
+    requester_username: str | None = None,
 ) -> "GatewayResult | None":
     """Replay before consulting mutable current resource state."""
     from backend.database import run_query
@@ -286,6 +308,7 @@ def _replay_protected_operation_from_storage(
         expected_tool=expected_tool,
         expected_resource_version=resource_version,
         expected_policy_version=expected_policy_version,
+        requester_username=requester_username,
     )
 
 
@@ -329,6 +352,7 @@ class ToolGateway:
         role: str,
         agent_name: str = "",
         *,
+        actor: str | None = None,
         operation_id: str | None = None,
     ) -> GatewayResult:
         """
@@ -338,6 +362,7 @@ class ToolGateway:
             tool_name  : 工具名稱（對應 tools_mapping 的 key）
             args       : 工具參數（dict）
             role       : 呼叫者角色（admin / warehouse / sales / hr）
+            actor      : 伺服器端登入帳號；所有 write/dangerous 操作必填
             agent_name : 呼叫者 Agent ID（選填）。填入時額外檢查 Agent 白名單。
                          例如：inventory_agent、sales_agent、orchestrator
 
@@ -354,6 +379,10 @@ class ToolGateway:
                 message="工具參數不得包含保留的內部欄位。",
             )
         args = dict(args)
+        protected_po = tool_name in {
+            "create_purchase_order",
+            "sync_external_purchase_order",
+        }
 
         # Step 1：確認工具存在
         if not registry.tool_exists(tool_name):
@@ -391,8 +420,35 @@ class ToolGateway:
             _write_log(tool_name, args, role, msg, success=False)
             return GatewayResult(status="denied", message=msg)
 
+        if protected_po:
+            from backend.access_control import (
+                ERP_EXCHANGE_PROPOSE,
+                load_principal,
+            )
+
+            principal = load_principal(actor or "")
+            if (
+                principal is None
+                or principal.role != role
+                or not principal.can(ERP_EXCHANGE_PROPOSE)
+            ):
+                msg = "受保護採購操作需要與登入身分一致的提案權限。"
+                _write_log(tool_name, args, role, msg, success=False)
+                return GatewayResult(status="denied", message=msg)
+            actor = principal.username
+
         # Step 5：依風險等級決定行為
         risk_level = registry.get_risk_level(tool_name)
+
+        if risk_level in {"write", "dangerous"} and not protected_po:
+            from backend.access_control import load_principal
+
+            principal = load_principal(actor or "")
+            if principal is None or principal.role != role:
+                msg = "寫入操作需要與登入身分一致的可驗證提案人。"
+                _write_log(tool_name, args, role, msg, success=False)
+                return GatewayResult(status="denied", message=msg)
+            actor = principal.username
 
         if risk_level in ("read_only", "suggestion"):
             # 直接執行
@@ -403,10 +459,6 @@ class ToolGateway:
             try:
                 resource_version = "unspecified"
                 policy_version = PO_APPROVAL_POLICY_VERSION
-                protected_po = tool_name in {
-                    "create_purchase_order",
-                    "sync_external_purchase_order",
-                }
                 if protected_po:
                     operation_id = str(operation_id or "").strip()
                     if not operation_id:
@@ -431,6 +483,7 @@ class ToolGateway:
                             args,
                             expected_tool=tool_name,
                             expected_policy_version=ERP_EXCHANGE_POLICY_VERSION,
+                            requester_username=actor,
                         )
                         if replay is not None:
                             return replay
@@ -457,6 +510,7 @@ class ToolGateway:
                         expected_tool=tool_name,
                         expected_resource_version=resource_version,
                         expected_policy_version=policy_version,
+                        requester_username=actor,
                     )
                     if replay is not None:
                         return replay
@@ -474,6 +528,7 @@ class ToolGateway:
                     tool_name,
                     args,
                     role,
+                    requester_username=actor,
                     operation_id=operation_id,
                     resource_version=resource_version,
                     policy_version=policy_version,
@@ -485,6 +540,7 @@ class ToolGateway:
                         expected_tool=tool_name,
                         expected_resource_version=resource_version,
                         expected_policy_version=policy_version,
+                        requester_username=actor,
                     )
                     if replay is None:
                         raise RuntimeError("審批單建立後無法讀回。")
@@ -508,6 +564,7 @@ class ToolGateway:
                     tool_name,
                     args,
                     role,
+                    requester_username=actor,
                     operation_id=operation_id,
                 )
             except Exception as exc:
@@ -566,6 +623,39 @@ class ToolGateway:
                 approver,
                 expected_tool="sync_external_purchase_order",
             )
+
+        from backend.access_control import (
+            GLOBAL_APPROVAL_DECIDE,
+            load_principal,
+        )
+
+        approver_principal = load_principal(approver)
+        if (
+            approver_principal is None
+            or not approver_principal.can(GLOBAL_APPROVAL_DECIDE)
+        ):
+            return GatewayResult(
+                status="denied",
+                message="核准者沒有處理全域審批項目的權限。",
+            )
+        approver_username = approver_principal.username
+
+        requester_username = str(item.get("requester_username") or "").strip()
+        if not requester_username:
+            return GatewayResult(
+                status="denied",
+                message=(
+                    "此舊版審批缺少可驗證的提案人，不能核准；"
+                    "請拒絕後由已登入使用者重新送審。"
+                ),
+                approval_id=approval_id,
+            )
+        if hmac.compare_digest(requester_username, approver_username):
+            return GatewayResult(
+                status="denied",
+                message="提案人不得核准自己的提案。",
+                approval_id=approval_id,
+            )
             
         if item["status"] != "pending":
             return GatewayResult(status="error", message=f"該審批項目的狀態為 {item['status']}，無法重複核准。")
@@ -574,24 +664,103 @@ class ToolGateway:
         args = item["parameters"]
         role = item["requester"]
         
-        # 真正執行操作
-        result_gateway = self._execute(tool_name, args, role)
-        if result_gateway.status != "ok":
-            return result_gateway
-        
-        # Only mark approved after the underlying write succeeds.
-        transitioned = transition_approval_status(
+        # 先用 CAS 取得唯一執行權，避免雙擊或兩個工作階段重複執行。
+        # 舊版工具尚未全面支援共用 DB connection；若效果完成後終態落庫失敗，
+        # 狀態會保留 executing 並要求人工對帳，不會自動重試。
+        claimed = transition_approval_status(
             approval_id,
             expected_status="pending",
             expected_version=item["version"],
-            new_status="approved",
-            approver=approver,
+            new_status="executing",
+            approver=approver_username,
         )
-        if not transitioned:
+        if not claimed:
             return GatewayResult(
                 status="error",
-                message="審批狀態已被其他操作更新，無法重複核准。",
+                message="審批狀態已被其他操作更新，未取得執行權。",
+                approval_id=approval_id,
             )
+
+        result_gateway = self._execute(tool_name, args, role)
+        if result_gateway.status != "ok":
+            transition_approval_status(
+                approval_id,
+                expected_status="executing",
+                expected_version=item["version"] + 1,
+                new_status="failed",
+                approver=approver_username,
+                reason=result_gateway.message,
+            )
+            result_gateway.approval_id = approval_id
+            return result_gateway
+
+        from backend.database import transaction
+
+        receipt_operation_id = str(item.get("operation_id") or "").strip()
+        if not receipt_operation_id:
+            receipt_operation_id = f"generic-approval:{approval_id}"
+        receipt_digest = str(item.get("payload_digest") or "").strip()
+        if not receipt_digest:
+            receipt_digest = canonical_payload_digest(
+                tool_name=tool_name,
+                args=args,
+                resource_version=str(item.get("resource_version") or "unspecified"),
+                policy_version=str(item.get("policy_version") or "generic-approval-v1"),
+                requester_username=requester_username,
+            )
+        try:
+            result_json = json.dumps(
+                result_gateway.data,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+                default=str,
+            )
+            with transaction(immediate=True) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO effect_receipts (
+                        operation_id, approval_id, payload_digest, result,
+                        created_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        receipt_operation_id,
+                        approval_id,
+                        receipt_digest,
+                        result_json,
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    ),
+                )
+                transitioned = transition_approval_status(
+                    approval_id,
+                    expected_status="executing",
+                    expected_version=item["version"] + 1,
+                    new_status="approved",
+                    approver=approver_username,
+                    conn=conn,
+                )
+                if not transitioned:
+                    raise RuntimeError("無法寫入審批終態。")
+        except Exception as exc:
+            msg = (
+                "工具效果已執行，但執行收據或審批終態寫入失敗；"
+                f"請人工對帳，系統不會自動重試：{exc}"
+            )
+            _write_log(
+                tool_name,
+                {"approval_id": approval_id},
+                approver_username,
+                msg,
+                success=False,
+            )
+            return GatewayResult(
+                status="error",
+                message=msg,
+                approval_id=approval_id,
+            )
+        result_gateway.approval_id = approval_id
         return result_gateway
 
     def _approve_purchase_order(
@@ -616,13 +785,14 @@ class ToolGateway:
         )
 
         failure_args = {"approval_id": approval_id}
+        approver_username = str(approver or "").strip()
         try:
             with transaction(immediate=True) as conn:
                 conn.row_factory = sqlite3.Row
                 item = conn.execute(
                     """
                     SELECT approval_id, tool_name, parameters, requester, status,
-                           approver, operation_id, payload_digest,
+                           requester_username, approver, operation_id, payload_digest,
                            resource_version, policy_version, version
                     FROM pending_approvals
                     WHERE approval_id = ?
@@ -639,14 +809,33 @@ class ToolGateway:
                         status="error", message="審批單工具類型不相符。"
                     )
 
-                actor = conn.execute(
-                    "SELECT role FROM users WHERE username = ?",
-                    (approver,),
-                ).fetchone()
-                if actor is None or actor["role"] != "admin":
+                from backend.access_control import (
+                    APPROVAL_DECIDE,
+                    load_principal,
+                )
+
+                approver_principal = load_principal(approver, conn=conn)
+                if (
+                    approver_principal is None
+                    or not approver_principal.can(APPROVAL_DECIDE)
+                ):
                     return GatewayResult(
                         status="denied",
-                        message="核准者目前不具管理員權限，操作未執行。",
+                        message="核准者目前不具審批權限，操作未執行。",
+                    )
+                approver_username = approver_principal.username
+                requester_username = str(
+                    item["requester_username"] or ""
+                ).strip()
+                if not requester_username:
+                    return GatewayResult(
+                        status="denied",
+                        message="審批單缺少可驗證的提案人，操作未執行。",
+                    )
+                if hmac.compare_digest(requester_username, approver_username):
+                    return GatewayResult(
+                        status="denied",
+                        message="提案人不得核准自己的操作。",
                     )
 
                 operation_id = item["operation_id"]
@@ -696,6 +885,7 @@ class ToolGateway:
                     args=args,
                     resource_version=resource_version,
                     policy_version=policy_version,
+                    requester_username=requester_username,
                 )
                 if not hmac.compare_digest(stored_digest, computed_digest):
                     return GatewayResult(
@@ -767,7 +957,7 @@ class ToolGateway:
                     expected_status="pending",
                     expected_version=start_version,
                     new_status="executing",
-                    approver=approver,
+                    approver=approver_username,
                     conn=conn,
                     approval_context=_PROTECTED_APPROVAL_CONTEXT,
                 ):
@@ -823,7 +1013,7 @@ class ToolGateway:
                     expected_status="executing",
                     expected_version=start_version + 1,
                     new_status="approved",
-                    approver=approver,
+                    approver=approver_username,
                     conn=conn,
                     approval_context=_PROTECTED_APPROVAL_CONTEXT,
                 ):
@@ -834,7 +1024,7 @@ class ToolGateway:
             _write_log(
                 expected_tool,
                 failure_args,
-                approver,
+                approver_username,
                 msg,
                 success=False,
             )
@@ -860,12 +1050,40 @@ class ToolGateway:
         }:
             return self._reject_purchase_order(approval_id, reason, approver)
 
+        from backend.access_control import (
+            GLOBAL_APPROVAL_DECIDE,
+            load_principal,
+        )
+
+        approver_principal = load_principal(approver)
+        if (
+            approver_principal is None
+            or not approver_principal.can(GLOBAL_APPROVAL_DECIDE)
+        ):
+            return GatewayResult(
+                status="denied",
+                message="拒絕者沒有處理全域審批項目的權限。",
+            )
+        approver_username = approver_principal.username
+
         if item["status"] != "pending":
             return GatewayResult(status="error", message=f"該審批項目的狀態為 {item['status']}，無法重複拒絕。")
             
         tool_name = item["tool_name"]
         args = item["parameters"]
         role = item["requester"]
+
+        requester_username = str(item.get("requester_username") or "").strip()
+        if requester_username and hmac.compare_digest(
+            requester_username, approver_username
+        ):
+            return GatewayResult(
+                status="denied",
+                message="提案人不得拒絕自己的提案。",
+                approval_id=approval_id,
+            )
+        if not requester_username:
+            reason = f"[legacy originator unavailable] {reason}"
         
         # 將狀態更新為 rejected 並存入拒絕原因
         if not transition_approval_status(
@@ -873,7 +1091,7 @@ class ToolGateway:
             expected_status="pending",
             expected_version=item["version"],
             new_status="rejected",
-            approver=approver,
+            approver=approver_username,
             reason=reason,
         ):
             return GatewayResult(
@@ -881,7 +1099,7 @@ class ToolGateway:
             )
         
         # 記錄作廢日誌，包含原因
-        msg = f"操作遭管理者「{approver}」拒絕，原因：{reason}。該工具執行已作廢。"
+        msg = f"操作遭管理者「{approver_username}」拒絕，原因：{reason}。該工具執行已作廢。"
         write_action_log(tool_name, args, role, msg, success=False)
         
         return GatewayResult(status="denied", message=msg)
@@ -896,11 +1114,13 @@ class ToolGateway:
         )
         from backend.database import transaction
 
+        approver_username = str(approver or "").strip()
         try:
             with transaction(immediate=True) as conn:
                 row = conn.execute(
                     """
-                    SELECT tool_name, parameters, requester, status, version
+                    SELECT tool_name, parameters, requester, status, version,
+                           requester_username
                     FROM pending_approvals WHERE approval_id = ?
                     """,
                     (approval_id,),
@@ -917,32 +1137,52 @@ class ToolGateway:
                     return GatewayResult(
                         status="error", message="審批單工具類型不相符。"
                     )
-                actor = conn.execute(
-                    "SELECT role FROM users WHERE username = ?", (approver,)
-                ).fetchone()
-                if actor is None or actor[0] != "admin":
+                from backend.access_control import (
+                    APPROVAL_DECIDE,
+                    load_principal,
+                )
+
+                approver_principal = load_principal(approver, conn=conn)
+                if (
+                    approver_principal is None
+                    or not approver_principal.can(APPROVAL_DECIDE)
+                ):
                     return GatewayResult(
-                        status="denied", message="拒絕者目前不具管理員權限。"
+                        status="denied", message="拒絕者目前不具審批權限。"
+                    )
+                approver_username = approver_principal.username
+                requester_username = str(row[5] or "").strip()
+                legacy_originator_missing = not requester_username
+                if requester_username and hmac.compare_digest(
+                    requester_username, approver_username
+                ):
+                    return GatewayResult(
+                        status="denied", message="提案人不得拒絕自己的操作。"
                     )
                 if row[3] != "pending":
                     return GatewayResult(
                         status="error",
                         message=f"該審批項目的狀態為 {row[3]}，無法拒絕。",
                     )
+                recorded_reason = (
+                    f"[legacy originator unavailable] {reason}"
+                    if legacy_originator_missing
+                    else reason
+                )
                 if not transition_approval_status(
                     approval_id,
                     expected_status="pending",
                     expected_version=row[4],
                     new_status="rejected",
-                    approver=approver,
-                    reason=reason,
+                    approver=approver_username,
+                    reason=recorded_reason,
                     conn=conn,
                     approval_context=_PROTECTED_APPROVAL_CONTEXT,
                 ):
                     raise RuntimeError("審批狀態競態，拒絕未生效。")
                 args = json.loads(row[1])
                 msg = (
-                    f"操作遭管理者「{approver}」拒絕，原因：{reason}。"
+                    f"操作遭管理者「{approver_username}」拒絕，原因：{recorded_reason}。"
                     "該工具執行已作廢。"
                 )
                 write_action_log(

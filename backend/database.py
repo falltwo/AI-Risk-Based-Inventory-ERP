@@ -35,6 +35,16 @@ def _get_db_path():
 DB_FILE = _get_db_path()
 
 
+def is_demo_mode_enabled() -> bool:
+    """Return whether synthetic users/data may be seeded and disclosed."""
+    return os.environ.get("ERP_DEMO_MODE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _ensure_db_dir():
     """確保資料庫所在目錄存在，方便企業指定任意路徑或匯入既有 .db"""
     d = os.path.dirname(DB_FILE)
@@ -49,6 +59,20 @@ def init_db():
 
     # 使用者與權限
     c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT, role TEXT, name TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS user_organizations (
+        username TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS organization_entitlements (
+        organization_id TEXT NOT NULL,
+        entitlement_key TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+        PRIMARY KEY (organization_id, entitlement_key)
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS app_metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )''')
     # 進銷存：商品、倉庫
     c.execute('''CREATE TABLE IF NOT EXISTS warehouses (warehouse_id TEXT PRIMARY KEY, name TEXT, address TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS inventory (product_id TEXT PRIMARY KEY, name TEXT, stock INTEGER, price INTEGER, cost REAL, reorder_point INTEGER, baseline_reorder_point INTEGER, daily_sales INTEGER, barcode TEXT, warehouse_id TEXT)''')
@@ -143,6 +167,7 @@ def init_db():
         tool_name TEXT,
         parameters TEXT,
         requester TEXT,
+        requester_username TEXT,
         status TEXT DEFAULT 'pending',
         approver TEXT,
         created_at TEXT,
@@ -255,6 +280,7 @@ def init_db():
 
     # A′：舊資料庫的審批列保留不動；新增欄位允許 NULL，只有新版操作受唯一鍵保護。
     pending_approval_migrations = (
+        ("requester_username", "TEXT"),
         ("operation_id", "TEXT"),
         ("payload_digest", "TEXT"),
         ("resource_version", "TEXT"),
@@ -474,7 +500,7 @@ def init_db():
 
     # Insert Mock Data if empty
     c.execute("SELECT COUNT(*) FROM users")
-    if c.fetchone()[0] == 0:
+    if is_demo_mode_enabled() and c.fetchone()[0] == 0:
         # N3：種子帳密以 salted hash 儲存（帳密仍為 admin/admin 等，僅儲存形式加密）
         from backend.passwords import hash_password
         c.execute("INSERT INTO users VALUES ('admin', ?, 'admin', '系統管理員')", (hash_password('admin'),))
@@ -530,8 +556,48 @@ def init_db():
                 c.execute("INSERT OR IGNORE INTO orders VALUES (?, ?, ?, ?, ?, ?, ?)", (f"ORD-HIST-{i}-01", "C001", "P001", 5 + i, "已出貨", past_date, 135000))
                 c.execute("INSERT OR IGNORE INTO orders VALUES (?, ?, ?, ?, ?, ?, ?)", (f"ORD-HIST-{i}-02", "C002", "P002", 20 - i, "已出貨", past_date, 12000))
 
+    # Demo 授權只在明確啟用時執行一次。日常 init_db 不得把已撤銷的
+    # membership/entitlement 自動補回，否則 live revocation 形同虛設。
+    demo_seeded = c.execute(
+        "SELECT 1 FROM app_metadata WHERE key = 'tier_demo_seed_v1'"
+    ).fetchone()
+    if is_demo_mode_enabled() and demo_seeded is None:
+        from backend.passwords import hash_password
+
+        demo_users = (
+            ("viewer", "viewer", "risk_viewer", "風險觀測員"),
+            ("planner", "planner", "supply_planner", "供應鏈規劃員"),
+            ("approver", "approver", "procurement_approver", "採購核准主管"),
+        )
+        for username, password, role, name in demo_users:
+            c.execute(
+                "INSERT OR IGNORE INTO users (username, password, role, name) "
+                "VALUES (?, ?, ?, ?)",
+                (username, hash_password(password), role, name),
+            )
+        c.execute(
+            "INSERT OR IGNORE INTO user_organizations (username, organization_id) "
+            "SELECT username, 'demo-org' FROM users "
+            "WHERE username IN "
+            "('admin', 'hr1', 'wh1', 'sales1', 'viewer', 'planner', 'approver')"
+        )
+        for entitlement_key in (
+            "l1_monitor",
+            "l2_decision",
+            "l3_governed_action",
+        ):
+            c.execute(
+                "INSERT OR IGNORE INTO organization_entitlements "
+                "(organization_id, entitlement_key, enabled) "
+                "VALUES ('demo-org', ?, 1)",
+                (entitlement_key,),
+            )
+        c.execute(
+            "INSERT INTO app_metadata (key, value) VALUES ('tier_demo_seed_v1', '1')"
+        )
+
     c.execute("SELECT COUNT(*) FROM suppliers")
-    if c.fetchone()[0] < 50:
+    if is_demo_mode_enabled() and c.fetchone()[0] < 50:
         import random
         regions = [
             ("伊朗", "中東", 35.6892, 51.3890, ["Tehran Supply Co.", "Pars Logistics", "Persian Tech Components", "Iran Manufacturing"]),

@@ -48,7 +48,12 @@ from backend.tool_gateway import gateway
 from backend.tool_registry import registry
 from backend.flex_builder import build_low_stock_flex, build_risk_events_flex
 from backend.chart_builder import build_carbon_trend_chart, build_finance_pie_chart
-from line_access import build_line_tools, env_flag, parse_line_user_ids
+from line_access import (
+    build_line_tools,
+    env_flag,
+    is_line_tool_allowed,
+    parse_line_user_ids,
+)
 
 # 確保資料庫初始化
 init_db()
@@ -108,6 +113,14 @@ def _get_line_user_role(line_user_id: str) -> str:
 def _build_gateway_function_response(tool_name: str, args: dict, role: str = None) -> tuple[dict, bool]:
     if role is None:
         role = _LINE_GATEWAY_DEFAULT_ROLE
+    if not is_line_tool_allowed(tool_name, registry, role):
+        return (
+            {
+                "status": "denied",
+                "error": "LINE 入口僅允許唯讀或建議工具；寫入操作請由已登入的 Web 介面送審。",
+            },
+            False,
+        )
     gw_result = gateway.call(tool_name, args or {}, role=role)
     payload = gw_result.to_dict()
 

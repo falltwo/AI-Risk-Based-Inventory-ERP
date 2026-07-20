@@ -274,7 +274,12 @@ def _run_agent(api_key, role_names: dict, final_input: str):
             # history：帶入本 session 的近期對話（排除剛加入的本輪 user 訊息），
             # orchestrator 內部會做 sliding window 修剪。
             hist = st.session_state.messages[:-1]
-            res = orchestrate(final_input, role=st.session_state.role, history=hist)
+            res = orchestrate(
+                final_input,
+                role=st.session_state.role,
+                actor=st.session_state.get("username"),
+                history=hist,
+            )
             reply_text = res.get("reply", "（無回覆內容）")
             
             status_box.empty()
