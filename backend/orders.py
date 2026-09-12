@@ -4,8 +4,245 @@ backend/orders.py
 """
 
 from datetime import datetime
-from .database import run_query
+from uuid import uuid4
+
+from .database import run_query, transaction
 from .auth import check_permission
+
+
+ORDER_STATUSES = frozenset({"處理中", "已出貨", "已取消"})
+_STOCK_RESERVED_STATUSES = frozenset({"處理中", "已出貨"})
+
+
+class OrderValidationError(ValueError):
+    """The requested order operation is not valid."""
+
+
+class InsufficientStockError(OrderValidationError):
+    """The order cannot reserve the requested stock."""
+
+
+def _validate_positive_quantity(quantity: int) -> int:
+    if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
+        raise OrderValidationError("訂單數量必須是正整數。")
+    return quantity
+
+
+def _validate_status(status: str) -> str:
+    normalized = str(status or "").strip()
+    if normalized not in ORDER_STATUSES:
+        raise OrderValidationError(f"不支援的訂單狀態：{normalized or '空白'}。")
+    return normalized
+
+
+def _write_stock_move(
+    conn,
+    *,
+    product_id: str,
+    warehouse_id: str | None,
+    quantity_change: int,
+    move_type: str,
+    order_id: str,
+    move_date: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO stock_moves (
+            product_id, warehouse_id, qty, move_type, ref_no, move_date, note
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            product_id,
+            warehouse_id,
+            quantity_change,
+            move_type,
+            order_id,
+            move_date,
+            "銷售訂單庫存異動",
+        ),
+    )
+
+
+def create_sales_order(
+    *,
+    order_id: str,
+    customer_id: str | None,
+    product_id: str,
+    quantity: int,
+    status: str = "處理中",
+    order_date: str | None = None,
+) -> dict:
+    """Create an order and reserve stock in one atomic transaction."""
+    order_id = str(order_id or "").strip()
+    product_id = str(product_id or "").strip()
+    customer_id = str(customer_id or "").strip() or None
+    if not order_id:
+        raise OrderValidationError("訂單編號不可空白。")
+    if not product_id:
+        raise OrderValidationError("產品編號不可空白。")
+    quantity = _validate_positive_quantity(quantity)
+    status = _validate_status(status)
+    order_date = str(order_date or "").strip() or datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    with transaction(immediate=True) as conn:
+        product = conn.execute(
+            "SELECT name, stock, price, warehouse_id FROM inventory WHERE product_id = ?",
+            (product_id,),
+        ).fetchone()
+        if product is None:
+            raise OrderValidationError(f"找不到產品編號 {product_id}。")
+        name, current_stock, price, warehouse_id = product
+
+        if customer_id is not None and conn.execute(
+            "SELECT 1 FROM customers WHERE customer_id = ?", (customer_id,)
+        ).fetchone() is None:
+            raise OrderValidationError(f"找不到客戶編號 {customer_id}。")
+
+        remaining_stock = current_stock
+        if status in _STOCK_RESERVED_STATUSES:
+            updated = conn.execute(
+                """
+                UPDATE inventory
+                SET stock = stock - ?
+                WHERE product_id = ? AND stock >= ?
+                """,
+                (quantity, product_id, quantity),
+            )
+            if updated.rowcount != 1:
+                raise InsufficientStockError(
+                    f"庫存不足！產品 {name} 目前只有 {current_stock} 件，"
+                    f"無法售出 {quantity} 件。"
+                )
+            remaining_stock = current_stock - quantity
+
+        conn.execute(
+            """
+            INSERT INTO orders (
+                order_id, customer_id, product_id, quantity, status,
+                order_date, total_amount
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                order_id,
+                customer_id,
+                product_id,
+                quantity,
+                status,
+                order_date,
+                quantity * (price or 0),
+            ),
+        )
+        if status in _STOCK_RESERVED_STATUSES:
+            _write_stock_move(
+                conn,
+                product_id=product_id,
+                warehouse_id=warehouse_id,
+                quantity_change=-quantity,
+                move_type="銷售預留",
+                order_id=order_id,
+                move_date=order_date,
+            )
+
+    return {
+        "order_id": order_id,
+        "product_id": product_id,
+        "product_name": name,
+        "quantity": quantity,
+        "status": status,
+        "remaining_stock": remaining_stock,
+        "order_date": order_date,
+    }
+
+
+def transition_order_status(order_id: str, new_status: str) -> dict:
+    """Change status and apply exactly one matching stock effect atomically."""
+    order_id = str(order_id or "").strip()
+    if not order_id:
+        raise OrderValidationError("訂單編號不可空白。")
+    new_status = _validate_status(new_status)
+    changed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    with transaction(immediate=True) as conn:
+        row = conn.execute(
+            """
+            SELECT o.product_id, o.quantity, o.status, i.name, i.stock,
+                   i.warehouse_id
+            FROM orders o
+            JOIN inventory i ON i.product_id = o.product_id
+            WHERE o.order_id = ?
+            """,
+            (order_id,),
+        ).fetchone()
+        if row is None:
+            raise OrderValidationError(f"找不到訂單 {order_id}。")
+
+        product_id, quantity, old_status, name, current_stock, warehouse_id = row
+        if old_status == new_status:
+            return {
+                "order_id": order_id,
+                "old_status": old_status,
+                "new_status": new_status,
+                "remaining_stock": current_stock,
+                "changed": False,
+            }
+
+        old_reserved = old_status in _STOCK_RESERVED_STATUSES
+        new_reserved = new_status in _STOCK_RESERVED_STATUSES
+        remaining_stock = current_stock
+        if old_reserved and not new_reserved:
+            conn.execute(
+                "UPDATE inventory SET stock = stock + ? WHERE product_id = ?",
+                (quantity, product_id),
+            )
+            remaining_stock = current_stock + quantity
+            _write_stock_move(
+                conn,
+                product_id=product_id,
+                warehouse_id=warehouse_id,
+                quantity_change=quantity,
+                move_type="取消回補",
+                order_id=order_id,
+                move_date=changed_at,
+            )
+        elif not old_reserved and new_reserved:
+            updated = conn.execute(
+                """
+                UPDATE inventory
+                SET stock = stock - ?
+                WHERE product_id = ? AND stock >= ?
+                """,
+                (quantity, product_id, quantity),
+            )
+            if updated.rowcount != 1:
+                raise InsufficientStockError(
+                    f"庫存不足！產品 {name} 目前只有 {current_stock} 件，"
+                    f"無法重新啟用數量 {quantity} 的訂單。"
+                )
+            remaining_stock = current_stock - quantity
+            _write_stock_move(
+                conn,
+                product_id=product_id,
+                warehouse_id=warehouse_id,
+                quantity_change=-quantity,
+                move_type="重新預留",
+                order_id=order_id,
+                move_date=changed_at,
+            )
+
+        conn.execute(
+            "UPDATE orders SET status = ? WHERE order_id = ?",
+            (new_status, order_id),
+        )
+
+    return {
+        "order_id": order_id,
+        "old_status": old_status,
+        "new_status": new_status,
+        "remaining_stock": remaining_stock,
+        "changed": True,
+    }
 
 
 def get_recent_orders() -> str:
@@ -40,34 +277,26 @@ def create_order(product_id: str, quantity: int) -> str:
     if quantity <= 0:
         return "建立失敗：訂單數量必須 > 0。"
 
-    # 先檢查庫存是否足夠
-    res = run_query("SELECT stock, name FROM inventory WHERE product_id=?", (product_id,))
-    if not res:
-        return f"建立失敗：找不到產品編號 {product_id}。"
-
-    current_stock, name = res[0]
-    if current_stock < quantity:
-        return f"建立失敗：庫存不足！產品 {name} 目前只有 {current_stock} 件，無法售出 {quantity} 件。"
-
-    # 產生訂單號碼與時間
     now_dt = datetime.now()
-    order_id = f"ORD-{now_dt.strftime('%Y%m%d-%H%M%S')}"
+    order_id = f"ORD-{now_dt.strftime('%Y%m%d-%H%M%S-%f')}-{uuid4().hex[:6]}"
     order_date = now_dt.strftime('%Y-%m-%d %H:%M:%S')
-    res_price = run_query("SELECT price FROM inventory WHERE product_id=?", (product_id,))
-    total_amount = (quantity * res_price[0][0]) if res_price else 0
 
     try:
-        run_query(
-            "INSERT INTO orders (order_id, customer_id, product_id, quantity, status, order_date, total_amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (order_id, None, product_id, quantity, "處理中", order_date, total_amount),
-            fetch=False,
+        result = create_sales_order(
+            order_id=order_id,
+            customer_id=None,
+            product_id=product_id,
+            quantity=quantity,
+            status="處理中",
+            order_date=order_date,
         )
-        # 扣除庫存
-        run_query("UPDATE inventory SET stock=? WHERE product_id=?", (current_stock - quantity, product_id), fetch=False)
         return (
             f"✅ 成功建立新訂單 (單號: {order_id}，時間: {order_date})："
-            f"售出 {quantity} 件 {name} ({product_id})，庫存已自動扣除，目前剩餘 {current_stock - quantity} 件。"
+            f"售出 {quantity} 件 {result['product_name']} ({product_id})，"
+            f"庫存已自動扣除，目前剩餘 {result['remaining_stock']} 件。"
         )
+    except OrderValidationError as e:
+        return f"建立失敗：{e}"
     except Exception as e:
         return f"建立訂單時發生資料庫錯誤：{e}"
 
@@ -83,12 +312,12 @@ def cancel_order(product_id: str, quantity: int, customer_id: str = "") -> str:
 
     if customer_id:
         rows = run_query(
-            "SELECT order_id FROM orders WHERE (customer_id = ? OR customer_id IS NULL) AND product_id = ? AND quantity = ? ORDER BY order_date DESC LIMIT 1",
+            "SELECT order_id FROM orders WHERE (customer_id = ? OR customer_id IS NULL) AND product_id = ? AND quantity = ? AND status != '已取消' ORDER BY order_date DESC LIMIT 1",
             (customer_id, product_id, quantity),
         )
     else:
         rows = run_query(
-            "SELECT order_id FROM orders WHERE product_id = ? AND quantity = ? ORDER BY order_date DESC LIMIT 1",
+            "SELECT order_id FROM orders WHERE product_id = ? AND quantity = ? AND status != '已取消' ORDER BY order_date DESC LIMIT 1",
             (product_id, quantity),
         )
 
@@ -96,10 +325,14 @@ def cancel_order(product_id: str, quantity: int, customer_id: str = "") -> str:
         return f"找不到產品 {product_id} 數量 {quantity} 的待取消訂單。"
 
     order_id = rows[0][0]
-    run_query("DELETE FROM orders WHERE order_id = ?", (order_id,), fetch=False)
-    from backend.inventory import update_inventory
-    update_inventory(product_id=product_id, quantity_change=quantity)
-    return f"✅ 已取消訂單 {order_id}，並將產品 {product_id} 庫存回補 {quantity} 件。"
+    try:
+        result = transition_order_status(order_id, "已取消")
+    except OrderValidationError as exc:
+        return f"取消訂單失敗：{exc}"
+    return (
+        f"✅ 已取消訂單 {order_id}，並將產品 {product_id} 庫存回補 "
+        f"{quantity} 件，目前庫存 {result['remaining_stock']} 件。"
+    )
 
 
 def get_receivables() -> str:
