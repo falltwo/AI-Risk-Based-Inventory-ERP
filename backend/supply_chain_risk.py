@@ -873,10 +873,15 @@ def what_if_simulation(
 # ── 風險事件與交期 ────────────────────────────────────────────────────
 
 def get_risk_events_list(limit=20):
-    """取得風險事件列表（id, event_type, region, country, impact_days, description, created_at）。"""
+    """取得風險事件列表（id, event_type, region, country, impact_days, description, created_at）。
+
+    add_risk_event 對同一地區是覆寫（id 不變、created_at 更新），所以「最新」
+    必須依 created_at 排序，否則被更新的舊事件永遠排在後面。
+    """
     conn = sqlite3.connect(DB_FILE)
     df = __pd_read(
-        "SELECT id, event_type, region, country, impact_days, description, created_at, news_id FROM supply_chain_events ORDER BY id DESC LIMIT ?",
+        "SELECT id, event_type, region, country, impact_days, description, created_at, news_id "
+        "FROM supply_chain_events ORDER BY COALESCE(created_at, '') DESC, id DESC LIMIT ?",
         conn,
         params=(limit,),
     )

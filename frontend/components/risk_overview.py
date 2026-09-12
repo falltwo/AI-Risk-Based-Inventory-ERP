@@ -8,13 +8,21 @@ from backend.erp_exchange import (
     build_purchase_order_template_csv,
     parse_purchase_order_csv,
 )
-from backend.l1_monitoring import map_purchase_rows_to_events
+from backend.l1_monitoring import (
+    get_latest_event_alerts,
+    map_purchase_rows_to_events,
+)
 from backend.supply_chain_risk import (
     get_risk_events_list,
     get_supply_chain_summary_kpis,
 )
 from frontend.components.supply_map import render_risk_heatmap
 from frontend.ui_utils import show_error
+
+
+_ALERT_WINDOW_OPTIONS = {"近 7 天": 7, "近 30 天": 30, "近 90 天": 90}
+_ALERT_LIMIT = 10
+_SEVERITY_ICONS = {"高": "🔴 高", "中": "🟠 中", "低": "🟡 低", "無": "⚪ 無"}
 
 
 _L1_DISPLAY_COLUMNS = {
@@ -44,23 +52,99 @@ def _load_supplier_context(supplier_ids: set[str]) -> dict[str, dict]:
     return {row["supplier_id"]: dict(row) for row in rows}
 
 
-def _render_latest_event_alerts(events: list[dict]) -> None:
+def _location_label(item: dict) -> str:
+    parts = [part for part in (item.get("country"), item.get("region")) if part]
+    return "／".join(parts) or "未設定"
+
+
+def _render_latest_event_alerts(*, actor: str) -> None:
     st.markdown("#### 🚨 最新事件告警")
-    if not events:
-        st.info("目前尚無已登錄的供應鏈風險事件。")
+    header_left, header_right = st.columns([3, 1])
+    with header_left:
+        st.caption(
+            "已確認事件來自 L2 登錄；「AI 偵測待確認」來自排程或 L2 更新新聞後、"
+            "尚未登錄為正式事件的情報。每次重新整理都會直接讀取最新資料。"
+        )
+    with header_right:
+        window_label = st.selectbox(
+            "告警時間範圍",
+            list(_ALERT_WINDOW_OPTIONS),
+            index=1,
+            key="l1_alert_window",
+            label_visibility="collapsed",
+        )
+    since_days = _ALERT_WINDOW_OPTIONS[window_label]
+
+    try:
+        feed = get_latest_event_alerts(
+            actor=actor, since_days=since_days, limit=_ALERT_LIMIT
+        )
+    except PermissionError:
+        st.error("此帳號沒有讀取事件告警的權限。")
+        return
+    except sqlite3.Error as exc:
+        show_error("事件告警讀取失敗", exc)
         return
 
-    event_rows = []
-    for event in events[:5]:
-        event_rows.append(
+    metric_a, metric_b, metric_c = st.columns(3)
+    metric_a.metric("已確認事件", f"{feed['confirmed_count']} 筆")
+    metric_b.metric("AI 偵測待確認", f"{feed['candidate_count']} 筆")
+    metric_c.metric("最高嚴重度", _SEVERITY_ICONS.get(feed["highest_severity"], feed["highest_severity"]))
+    st.caption(f"統計區間自 {feed['since']} 起 ・ 更新時間 {feed['generated_at']}")
+
+    st.markdown("**已確認事件**")
+    if not feed["confirmed"]:
+        st.info("此區間內尚無已登錄的供應鏈風險事件。")
+    else:
+        confirmed_rows = [
             {
-                "事件": event.get("event_type") or "未分類",
-                "地區": event.get("region") or event.get("country") or "未設定",
-                "預估延遲": f"{int(event.get('impact_days') or 0)} 天",
-                "事件說明": event.get("description") or "未提供",
+                "嚴重度": _SEVERITY_ICONS.get(item["severity"], item["severity"]),
+                "事件": item["event_type"],
+                "國家／地區": _location_label(item),
+                "預估延遲": f"{item['impact_days']} 天",
+                "登錄時間": item["created_at"] or "未記錄",
+                "來源": item["source"],
+                "來源新聞": item["news_title"] or "—",
+                "原文連結": item["news_url"] or "",
+                "事件說明": item["description"] or "未提供",
             }
+            for item in feed["confirmed"]
+        ]
+        st.dataframe(
+            pd.DataFrame(confirmed_rows),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "原文連結": st.column_config.LinkColumn("原文連結", display_text="開啟"),
+            },
         )
-    st.dataframe(pd.DataFrame(event_rows), width="stretch", hide_index=True)
+
+    st.markdown("**AI 偵測待確認**")
+    if not feed["candidates"]:
+        st.success("此區間內沒有尚未登錄的高風險情報。")
+    else:
+        candidate_rows = [
+            {
+                "嚴重度": _SEVERITY_ICONS.get(item["severity"], item["severity"]),
+                "類型": item["event_type"],
+                "國家／地區": _location_label(item),
+                "預估延遲": f"{item['impact_days']} 天",
+                "情報時間": item["observed_at"] or "未記錄",
+                "新聞標題": item["title"] or "（無標題）",
+                "原文連結": item["url"] or "",
+                "狀態": item["status"],
+            }
+            for item in feed["candidates"]
+        ]
+        st.dataframe(
+            pd.DataFrame(candidate_rows),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "原文連結": st.column_config.LinkColumn("原文連結", display_text="開啟"),
+            },
+        )
+        st.caption("待確認情報需由具 L2 權限的人員在「情報與決策」頁登錄後，才會成為正式事件並進入對映。")
 
 
 def _render_read_only_mapping(events: list[dict]) -> None:
@@ -143,7 +227,7 @@ def _render_read_only_mapping(events: list[dict]) -> None:
         key="l1_monitor_download_alerts",
     )
 
-def render_risk_overview():
+def render_risk_overview(*, actor: str):
     """渲染 L1 唯讀閉環：事件告警、熱圖、資料對映與通知預覽。"""
     st.markdown("#### 📊 供應鏈風險總覽 (Risk Overview)")
     
@@ -177,6 +261,9 @@ def render_risk_overview():
         render_risk_heatmap(key="overview_heatmap")
 
     st.markdown("<br>", unsafe_allow_html=True)
+    _render_latest_event_alerts(actor=actor)
+
+    # CSV 對映只比對「已確認」事件；候選情報尚未登錄，不參與對映。
     try:
         event_frame = get_risk_events_list(limit=30)
         events = [] if event_frame is None or event_frame.empty else event_frame.to_dict("records")
@@ -184,6 +271,5 @@ def render_risk_overview():
         show_error("風險事件讀取失敗", exc)
         events = []
 
-    _render_latest_event_alerts(events)
     st.markdown("<br>", unsafe_allow_html=True)
     _render_read_only_mapping(events)

@@ -32,13 +32,13 @@ def render(
     st.markdown("<div class='premium-title'>🌱 供應鏈與風險監控</div>", unsafe_allow_html=True)
 
     if "analysis" not in sections and "what_if" not in sections:
-        render_risk_overview()
+        render_risk_overview(actor=principal.username)
         return
 
     overview_tab, analysis_tab = st.tabs(["📊 L1 風險總覽", "🧭 L2 情報與決策"])
 
     with overview_tab:
-        render_risk_overview()
+        render_risk_overview(actor=principal.username)
 
     with analysis_tab:
         # Step 1: Intelligence Hub
