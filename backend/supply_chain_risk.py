@@ -816,7 +816,9 @@ def analyze_heatmap_risk(
         updates = _gate_heatmap_updates(payload.get("更新"), valid_list, name_expansions)
         suggested_events = _coerce_heatmap_events(payload.get("事件"))
         updates, suggested_events, audit = gate_by_evidence(updates, suggested_events, evidence)
-        result.update({"summary": summary, "updates": updates, "events": suggested_events, "audit": audit})
+        result.update({"summary": summary, "updates": updates, "events": suggested_events, "audit": audit,
+                       # 模型可能想 1～2 分鐘，「產生時間」以回覆完成為準
+                       "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
     except Exception as e:
         import traceback
         traceback.print_exc()
