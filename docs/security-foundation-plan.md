@@ -1,54 +1,54 @@
-# Security Foundation Improvement Plan
+# 安全基礎改善計畫
 
-## Purpose
+## 目的
 
-This document defines the first implementation phase for strengthening identity, authorization, and LINE integration boundaries before further AI decision features are added.
+本文件定義第一階段的實作計畫：在持續新增 AI 決策功能前，先強化身分識別、授權與 LINE 整合的安全邊界。
 
-## Scope
+## 範圍
 
-### 1. Password storage and migration
+### 1. 密碼儲存與遷移
 
-- Replace the current custom salted SHA-256 password scheme with Argon2id.
-- Keep a version field for password hashes.
-- On a successful legacy login, transparently re-hash the password with Argon2id.
-- Add a rate limit and temporary lockout for repeated failed logins.
-- Record successful logins, failures, lockouts, and password migration events in the audit trail.
+- 以 Argon2id 取代目前自訂的加鹽 SHA-256 密碼機制。
+- 為密碼雜湊保留版本欄位。
+- 舊版密碼成功登入後，透明地以 Argon2id 重新雜湊。
+- 為重複登入失敗新增節流與暫時鎖定機制。
+- 在稽核軌跡中記錄登入成功、登入失敗、鎖定與密碼遷移事件。
 
-### 2. Backend authorization
+### 2. 後端授權
 
-- Represent the authenticated actor with an explicit `Principal` object: user ID, organization ID, role, entitlements, authentication method, and session expiry.
-- Require a principal and explicit capability check on every sensitive backend write.
-- Reload membership and entitlement state from the database for sensitive operations.
-- Fail closed when identity, organization membership, entitlement, or session validity is missing or revoked.
-- Do not allow Streamlit runtime detection to bypass backend authorization.
+- 以明確的 `Principal` 物件表示已驗證的行為者：使用者 ID、組織 ID、角色、權限、驗證方式與工作階段到期時間。
+- 每個敏感的後端寫入操作都必須要求 Principal 與明確的權限檢查。
+- 對敏感操作，應從資料庫重新載入組織成員資格與權限狀態。
+- 身分、組織成員資格、權限或工作階段有效性缺失或已撤銷時，預設拒絕存取。
+- 不允許 Streamlit 執行環境判斷繞過後端授權。
 
-### 3. LINE identity boundary
+### 3. LINE 身分識別邊界
 
-- Map LINE user IDs only to approved, active ERP identities.
-- Deny access by default when a LINE identity is unknown, revoked, or cannot be looked up.
-- Remove permissive role fallbacks such as defaulting lookup failures to a warehouse role.
-- Return a generic, user-safe error message; write technical details only to server logs and audit events.
+- LINE 使用者 ID 僅能對應到已核准且有效的 ERP 身分。
+- LINE 身分未知、已撤銷或無法查詢時，預設拒絕存取。
+- 移除寬鬆的角色備援行為，例如將查詢失敗預設成倉儲角色。
+- 對使用者回傳安全的一般錯誤；技術細節只寫入伺服器日誌與稽核事件。
 
-### 4. Verification
+### 4. 驗證
 
-- Unit tests: Argon2id verification, legacy migration, rate limiting, invalid principals, revoked users, and unknown LINE users.
-- Integration tests: sensitive writes reject unauthenticated or unauthorized requests.
-- Regression tests: error replies do not disclose stack traces, database paths, tokens, or internal exception details.
+- 單元測試：Argon2id 驗證、舊版密碼遷移、節流、無效 Principal、已撤銷使用者與未知 LINE 使用者。
+- 整合測試：敏感寫入操作必須拒絕未驗證或未授權的請求。
+- 迴歸測試：錯誤回覆不得洩漏堆疊追蹤、資料庫路徑、權杖或內部例外細節。
 
-## Acceptance criteria
+## 驗收條件
 
-- [ ] New passwords are stored with Argon2id.
-- [ ] Legacy credentials upgrade on successful login without exposing passwords.
-- [ ] Repeated failed logins are throttled and logged.
-- [ ] Sensitive backend writes require a valid principal and capability.
-- [ ] Unknown or revoked LINE users cannot access ERP tools.
-- [ ] User-facing errors do not expose internal technical details.
-- [ ] Automated tests cover the security behaviour above.
+- [ ] 新密碼以 Argon2id 儲存。
+- [ ] 舊版憑證在成功登入後升級，且不暴露密碼。
+- [ ] 重複登入失敗會受到節流並留下紀錄。
+- [ ] 敏感後端寫入操作需要有效的 Principal 與權限。
+- [ ] 未知或已撤銷的 LINE 使用者無法存取 ERP 工具。
+- [ ] 使用者可見的錯誤不暴露內部技術細節。
+- [ ] 自動化測試涵蓋上述安全行為。
 
-## Out of scope
+## 不包含的範圍
 
-- SSO or external IAM integration
-- PostgreSQL migration
-- Shared-database multi-tenancy
-- AI decision-evidence records and explainability
-- External ERP outbox or worker architecture
+- SSO 或外部 IAM 整合
+- PostgreSQL 遷移
+- 共用資料庫多租戶
+- AI 決策證據紀錄與可解釋性
+- 外部 ERP outbox 或 worker 架構
