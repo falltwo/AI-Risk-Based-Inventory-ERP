@@ -98,17 +98,18 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 # Flex：單一 text 元件最多約 2000 字元；整則 Flex JSON 有大小上限，保守分段
 _FLEX_CHUNK = 1400
 _FLEX_MAX_CHUNKS = 5
-def _get_line_principal(line_user_id: str):
-    """LINE ID 必須對應到有效 ERP Principal；查詢失敗時拒絕。"""
-    try:
-        from backend.access_control import resolve_line_principal
-        return resolve_line_principal(line_user_id)
-    except Exception:
-        return None
+_LINE_GATEWAY_DEFAULT_ROLE = "warehouse"
 
 
-def _build_gateway_function_response(tool_name: str, args: dict, principal) -> tuple[dict, bool]:
-    if principal is None or not is_line_tool_allowed(tool_name, registry, principal.role):
+def _get_line_user_role(line_user_id: str) -> str:
+    """LINE 入口不要求帳號綁定，固定使用受限的 warehouse 權限。"""
+    return _LINE_GATEWAY_DEFAULT_ROLE
+
+
+def _build_gateway_function_response(tool_name: str, args: dict, role: str = None) -> tuple[dict, bool]:
+    if role is None:
+        role = _LINE_GATEWAY_DEFAULT_ROLE
+    if not is_line_tool_allowed(tool_name, registry, role):
         return (
             {
                 "status": "denied",
@@ -116,9 +117,7 @@ def _build_gateway_function_response(tool_name: str, args: dict, principal) -> t
             },
             False,
         )
-    gw_result = gateway.call(
-        tool_name, args or {}, role=principal.role, actor=principal.username
-    )
+    gw_result = gateway.call(tool_name, args or {}, role=role)
     payload = gw_result.to_dict()
 
     if gw_result.is_ok():
@@ -131,6 +130,9 @@ def _build_gateway_function_response(tool_name: str, args: dict, principal) -> t
 
     payload["error"] = gw_result.message or f"Gateway returned status: {gw_result.status}"
     return payload, False
+
+
+LINE_TOOLS = build_line_tools(ALL_TOOLS, registry, role=_LINE_GATEWAY_DEFAULT_ROLE)
 
 
 def _gateway_payload_to_reply(payload: dict) -> str:
@@ -244,9 +246,7 @@ def reply_text_to_flex_message(reply_text: str, title="進銷存助理") -> Flex
     return FlexMessage(alt_text=_flex_alt_text(reply_text), contents=bubble)
 
 
-def get_ai_response(user_msg: str, audio_bytes: bytes = None, extra_system_prompt: str = "", user_id: str = None, principal=None) -> tuple[str, list[str]]:
-    if principal is None:
-        return "❌ 此 LINE 帳號尚未完成 ERP 身分綁定，無法存取系統資料。", []
+def get_ai_response(user_msg: str, audio_bytes: bytes = None, extra_system_prompt: str = "", user_id: str = None, erp_role: str = None) -> tuple[str, list[str]]:
     from datetime import datetime
     today_str = datetime.now().strftime("%Y-%m-%d")
     current_year = datetime.now().year
@@ -316,7 +316,7 @@ def get_ai_response(user_msg: str, audio_bytes: bytes = None, extra_system_promp
                     contents=history,
                     config=types.GenerateContentConfig(
                         system_instruction=system_prompt,
-                        tools=build_line_tools(ALL_TOOLS, registry, role=principal.role),
+                        tools=LINE_TOOLS,
                         temperature=0.2,
                         # Match the Web orchestrator: the SDK must not execute
                         # Python tools directly; every tool call goes through
@@ -341,7 +341,7 @@ def get_ai_response(user_msg: str, audio_bytes: bytes = None, extra_system_promp
             try:
                 args = dict(fc.args or {})
                 _write_line_dispatch_log(user_msg, fc.name, args)
-                payload, executed = _build_gateway_function_response(fc.name, args, principal)
+                payload, executed = _build_gateway_function_response(fc.name, args, role=erp_role)
                 # 自動攔截有視覺化的工具，主動加入儀表板
                 if executed and fc.name in ["get_all_inventory", "get_low_stock_inventory", "calculate_smart_restocking"]:
                     requested_dashboards.add("low_stock")
@@ -494,10 +494,7 @@ def handle_text_message(event):
         line_bot_api = MessagingApi(api_client)
         user_msg = event.message.text.strip()
         user_id = event.source.user_id
-        principal = _get_line_principal(user_id)
-        if principal is None:
-            _send_full_reply(event, line_bot_api, user_msg, "❌ 此 LINE 帳號尚未完成 ERP 身分綁定，無法存取系統資料。", [])
-            return
+        erp_role = _get_line_user_role(user_id)
 
         # 強制路由：查「全部/所有」庫存時，直接走後端工具，避免被 LLM 自由改寫成舊格式
         direct_all_inventory = (
@@ -509,18 +506,18 @@ def handle_text_message(event):
         
         try:
             if direct_all_inventory:
-                payload, executed = _build_gateway_function_response("get_all_inventory", {}, principal)
+                payload, executed = _build_gateway_function_response("get_all_inventory", {}, role=erp_role)
                 reply_text = _gateway_payload_to_reply(payload)
                 dashboards = ["low_stock"] if executed else []
             elif direct_smart_inventory:
-                low_stock_payload, low_stock_executed = _build_gateway_function_response("get_low_stock_inventory", {}, principal)
-                smart_payload, smart_executed = _build_gateway_function_response("calculate_smart_restocking", {}, principal)
+                low_stock_payload, low_stock_executed = _build_gateway_function_response("get_low_stock_inventory", {}, role=erp_role)
+                smart_payload, smart_executed = _build_gateway_function_response("calculate_smart_restocking", {}, role=erp_role)
                 low_stock_text = _gateway_payload_to_reply(low_stock_payload)
                 smart_text = _gateway_payload_to_reply(smart_payload)
                 reply_text = f"{low_stock_text}\n\n🤖『AI 補貨建議』\n\n{smart_text}"
                 dashboards = ["low_stock"] if (low_stock_executed or smart_executed) else []
             else:
-                reply_text, dashboards = get_ai_response(user_msg, user_id=user_id, principal=principal)
+                reply_text, dashboards = get_ai_response(user_msg, user_id=user_id, erp_role=erp_role)
         except Exception as e:
             reply_text = f"❌ 抱歉，系統運作發生錯誤：{e}"
             dashboards = []
@@ -534,13 +531,10 @@ def handle_audio_message(event):
         line_bot_api = MessagingApi(api_client)
         blob_api = MessagingApiBlob(api_client)
         user_id = event.source.user_id
-        principal = _get_line_principal(user_id)
-        if principal is None:
-            _send_full_reply(event, line_bot_api, "[語音訊息交辦]", "❌ 此 LINE 帳號尚未完成 ERP 身分綁定，無法存取系統資料。", [])
-            return
+        erp_role = _get_line_user_role(user_id)
         try:
             message_content = blob_api.get_message_content(event.message.id)
-            reply_text, dashboards = get_ai_response("", audio_bytes=message_content, user_id=user_id, principal=principal)
+            reply_text, dashboards = get_ai_response("", audio_bytes=message_content, user_id=user_id, erp_role=erp_role)
         except Exception as e:
             reply_text = f"❌ 抱歉，語音處理發生錯誤：{e}"
             dashboards = []
@@ -554,13 +548,10 @@ def handle_postback(event):
         line_bot_api = MessagingApi(api_client)
         data = event.postback.data
         user_id = event.source.user_id
-        principal = _get_line_principal(user_id)
-        if principal is None:
-            _send_full_reply(event, line_bot_api, f"[按鈕觸發] {data}", "❌ 此 LINE 帳號尚未完成 ERP 身分綁定，無法存取系統資料。", [])
-            return
+        erp_role = _get_line_user_role(user_id)
         try:
             # 讓 AI 理解這是由按鈕觸發的指令
-            reply_text, dashboards = get_ai_response(data, extra_system_prompt="使用者剛按下了一鍵觸發按鈕，請根據該按鈕指令執行相關作業並回報。", user_id=user_id, principal=principal)
+            reply_text, dashboards = get_ai_response(data, extra_system_prompt="使用者剛按下了一鍵觸發按鈕，請根據該按鈕指令執行相關作業並回報。", user_id=user_id, erp_role=erp_role)
         except Exception as e:
             reply_text = f"❌ 抱歉，快捷觸發發生錯誤：{e}"
             dashboards = []
@@ -584,16 +575,11 @@ async def execute_morning_briefing():
             line_bot_api = MessagingApi(api_client)
             sent = 0
             failed = 0
-            skipped_unbound = 0
             for user_id in LINE_BRIEFING_USER_IDS:
-                principal = _get_line_principal(user_id)
-                if principal is None:
-                    skipped_unbound += 1
-                    print("Morning briefing skipped for an unbound or revoked LINE identity.")
-                    continue
                 try:
                     reply_text, _ = await asyncio.to_thread(
-                        get_ai_response, prompt, user_id=user_id, principal=principal
+                        get_ai_response, prompt, user_id=user_id,
+                        erp_role=_get_line_user_role(user_id)
                     )
                     if not reply_text:
                         reply_text = "今日暫無早報資訊可提供。"
@@ -609,13 +595,12 @@ async def execute_morning_briefing():
                     print(f"Morning briefing push failed for one allowlisted user: {e}")
             print(
                 "Morning briefing finished: "
-                f"sent={sent}, failed={failed}, skipped_unbound={skipped_unbound}."
+                f"sent={sent}, failed={failed}."
             )
             return {
                 "status": "completed",
                 "sent": sent,
                 "failed": failed,
-                "skipped_unbound": skipped_unbound,
             }
                 
     except Exception as e:

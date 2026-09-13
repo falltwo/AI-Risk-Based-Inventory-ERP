@@ -73,6 +73,7 @@ def test_admin_keeps_full_existing_navigation_and_dashboard():
         "Agent Dashboard",
     ]
     assert menu["🛒 採購管理"][-1] == "ERP CSV 交換"
+    assert menu["🔐 安全管理"] == ["安全稽核紀錄"]
     assert dashboard_mode(principal) == "full"
 
 

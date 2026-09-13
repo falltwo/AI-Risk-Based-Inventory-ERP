@@ -25,6 +25,7 @@ APPROVAL_DECIDE = "approval.decide"
 GLOBAL_APPROVAL_DECIDE = "approval.global.decide"
 ERP_EXCHANGE_EXPORT = "erp.exchange.export"
 ERP_EXCHANGE_RECONCILE = "erp.exchange.reconcile"
+SECURITY_AUDIT_READ = "security.audit.read"
 
 L1_MONITOR = "l1_monitor"
 L2_DECISION = "l2_decision"
@@ -43,6 +44,7 @@ _CAPABILITY_ENTITLEMENT = {
     GLOBAL_APPROVAL_DECIDE: L3_GOVERNED_ACTION,
     ERP_EXCHANGE_EXPORT: L3_GOVERNED_ACTION,
     ERP_EXCHANGE_RECONCILE: L3_GOVERNED_ACTION,
+    SECURITY_AUDIT_READ: L3_GOVERNED_ACTION,
 }
 
 _ALL_CAPABILITIES = frozenset(_CAPABILITY_ENTITLEMENT)
@@ -166,33 +168,6 @@ def load_principal(
         return _load(conn)
     with sqlite3.connect(database.DB_FILE) as owned_conn:
         return _load(owned_conn)
-
-
-def resolve_line_principal(
-    line_user_id: str, *, conn: sqlite3.Connection | None = None
-) -> Principal | None:
-    """將 LINE ID 對應為有效 Principal；任何缺漏都預設拒絕。"""
-    line_user_id = str(line_user_id or "").strip()
-    if not line_user_id:
-        return None
-
-    def _resolve(active_conn: sqlite3.Connection) -> Principal | None:
-        try:
-            row = active_conn.execute(
-                """SELECT username FROM line_user_identities
-                   WHERE line_user_id = ? AND enabled = 1""",
-                (line_user_id,),
-            ).fetchone()
-        except sqlite3.Error:
-            return None
-        if row is None:
-            return None
-        return load_principal(row[0], conn=active_conn)
-
-    if conn is not None:
-        return _resolve(conn)
-    with sqlite3.connect(database.DB_FILE) as owned_conn:
-        return _resolve(owned_conn)
 
 
 def has_capability(
