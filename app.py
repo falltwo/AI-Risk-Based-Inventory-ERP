@@ -33,7 +33,8 @@ init_db()
 # ── 頁面設定 ────────────────────────────────────────────────────────
 st.set_page_config(page_title="進銷存安全系統", page_icon="🛡️", layout="wide")
 if os.getenv("ERP_ISOLATED_TEST") == "1":
-    st.warning("隔離測試環境｜固定新聞與模擬 AI｜不發送通知｜背景排程關閉")
+    news_mode = "真實新聞快照" if os.getenv("ERP_NEWS_CAPTURE") else "固定新聞"
+    st.warning(f"隔離測試環境｜{news_mode}與模擬 AI｜不發送通知｜背景排程關閉")
 
 # ── 全域 CSS ────────────────────────────────────────────────────────
 st.markdown("""

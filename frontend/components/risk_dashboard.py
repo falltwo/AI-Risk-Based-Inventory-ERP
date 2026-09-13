@@ -1,4 +1,5 @@
 from backend.region_matching import matches_location, split_location
+import os
 import streamlit as st
 import re
 import pandas as pd
@@ -63,6 +64,9 @@ def render_intelligence_gathering(
     st.subheader("🔍 即時全球情報與事件登錄")
     st.caption("透過 GNews/RSS 抓取全球供應鏈相關新聞，並利用 AI 自動偵測受影響國家、地區與事件類型（戰爭、氣候、罷工等）。")
 
+    from backend.isolated_runtime import news_capture
+    capture = news_capture() if os.getenv("ERP_ISOLATED_TEST") == "1" else None
+
     # 更新即時新聞：依供應商國家從 GNews/RSS 抓取並寫入 DB
     _suppliers = get_suppliers_for_map()
     _countries = []
@@ -72,6 +76,9 @@ def render_intelligence_gathering(
     if not _countries:
         _countries = ["台灣", "日本", "美國", "南韓", "中國", "越南", "墨西哥"]
     
+    if capture:
+        _countries = list(dict.fromkeys(a["country"] for a in capture["articles"]))
+
     col_time, col_cate, col_btn, col_help = st.columns([1, 1, 1, 2])
     with col_time:
         time_options = {"7 天": 7, "30 天": 30, "90 天": 90}
@@ -104,10 +111,12 @@ def render_intelligence_gathering(
         st.caption("系統會過濾不相關新聞，並參考過往紀錄推估延遲。")
     with col_btn:
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("📡 更新即時新聞", key="refresh_news_btn", help="依各供應商國家抓取最近新聞，並由 AI 自動分析類別與延遲天數。"):
+        refresh_label = "🔁 重播本批真實新聞" if capture else "📡 更新即時新聞"
+        refresh_help = "使用已抓取的新聞快照，不重新連線；成功資料不重做逐篇分析。" if capture else "依各供應商國家抓取最近新聞，並由 AI 自動分析類別與延遲天數。"
+        if st.button(refresh_label, key="refresh_news_btn", help=refresh_help):
             with st.status("正在獲獲取供應鏈情報並由 AI 進行分析評分...") as status:
-                status.write("📡 正在平行抓取各國原始新聞與預過濾...")
-                status.write("🧠 正在啟動 Gemini 進行深度風險評估 (約 30-40 秒)...")
+                status.write("正在重播已抓取的真實新聞..." if capture else "📡 正在平行抓取各國原始新聞與預過濾...")
+                status.write("AI 使用模擬回應；不呼叫付費模型。" if os.getenv("ERP_ISOLATED_TEST") == "1" else "🧠 正在啟動模型進行風險評估...")
                 res = refresh_news_for_countries(
                     _countries, 
                     gemini_api_key=api_key or None,
@@ -127,7 +136,7 @@ def render_intelligence_gathering(
             st.rerun()
 
     # 讀取現有新聞
-    news_list_raw = get_news_from_db(limit=60, order_by_latest=True, within_days=within_days)
+    news_list_raw = get_news_from_db(limit=60, order_by_latest=True, within_days=None if capture else within_days)
     
     # 執行類別過濾與去重
     filtered_news = []

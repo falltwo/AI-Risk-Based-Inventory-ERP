@@ -14,12 +14,31 @@ def main():
     parser.add_argument("--scheduler-once", metavar="KEY")
     parser.add_argument("--port", type=int, default=8511)
     parser.add_argument("--scenario", choices=("mixed", "success"), default="mixed")
+    parser.add_argument("--acceptance-dir", type=Path,
+                        help="Show a real-news acceptance snapshot in its own review database")
     args = parser.parse_args()
     os.chdir(ROOT)
     # Always pick a local test DB; never inherit a user's production database setting.
     db_name = "erp-batch1.db" if args.scenario == "mixed" else "erp-batch1-success.db"
     db_path = ROOT / ".isolated" / db_name
     db_path.parent.mkdir(exist_ok=True)
+    os.environ.pop("ERP_NEWS_CAPTURE", None)
+    os.environ.pop("ERP_NEWS_ACCEPTANCE", None)
+    if args.acceptance_dir:
+        import sqlite3
+        acceptance_dir = args.acceptance_dir.resolve()
+        if not acceptance_dir.is_relative_to((ROOT / ".isolated").resolve()):
+            parser.error("Acceptance directory must be inside this worktree's .isolated folder")
+        capture_path = acceptance_dir / "news-capture.json"
+        report_path = acceptance_dir / "acceptance-results.json"
+        original_db = acceptance_dir / "acceptance.db"
+        if not all(p.is_file() for p in (capture_path, report_path, original_db)):
+            parser.error("A complete news capture, acceptance report and database are required")
+        db_path = acceptance_dir / "preview.db"
+        if not db_path.exists():
+            with sqlite3.connect(str(original_db)) as source, sqlite3.connect(str(db_path)) as target:
+                source.backup(target)
+        os.environ.update(ERP_NEWS_CAPTURE=str(capture_path), ERP_NEWS_ACCEPTANCE=str(report_path))
     for key in ("OPENAI_API_KEY", "GEMINI_API_KEY", "GNEWS_API_KEY", "LINE_CHANNEL_ACCESS_TOKEN", "LINE_CHANNEL_SECRET", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
         os.environ.pop(key, None)
     os.environ["ERP_ISOLATED_SCENARIO"] = args.scenario
@@ -34,11 +53,12 @@ def main():
     # Stable official nodes for review, independent of the legacy random demo seed.
     import sqlite3
     with sqlite3.connect(db_path) as conn:
-        conn.execute("UPDATE suppliers SET is_official=0 WHERE supplier_id NOT LIKE 'BATCH1-%'")
-        for sid, country, region, lat, lon in (("BATCH1-TWN","台灣","北區",25.03,121.56),("BATCH1-TWS","台灣","南區",22.63,120.30),("BATCH1-JP","日本","東京",35.68,139.69)):
-            conn.execute("INSERT OR IGNORE INTO suppliers(supplier_id,name,country,region,latitude,longitude,is_official) VALUES (?,?,?,?,?,?,1)", (sid,f"測試供應商 {country} {region}",country,region,lat,lon))
+        if args.acceptance_dir:
+            print("Real news snapshot loaded; analysis remains mocked; acceptance evidence is preserved.")
+        else:
+            seed_preview_suppliers(conn)
     print(f"ISOLATED ERP_DB_PATH={db_path}")
-    print("Fixed news/LLM fixtures; external network blocked; background scheduler disabled.")
+    print("News replay/LLM fixtures; external network blocked; background scheduler disabled.")
     if args.scheduler_once:
         from backend.scheduler import SchedulerConfig, run_scheduled_refresh
         result = run_scheduled_refresh(SchedulerConfig(actor="planner", max_attempts=2, retry_seconds=0), job_key=args.scheduler_once)
@@ -50,6 +70,11 @@ def main():
                     f"--server.port={args.port}", "--server.headless=true", "--browser.gatherUsageStats=false"]
         cli.main()
 
+
+def seed_preview_suppliers(conn):
+    conn.execute("UPDATE suppliers SET is_official=0 WHERE supplier_id NOT LIKE 'BATCH1-%'")
+    for sid, country, region, lat, lon in (("BATCH1-TWN","台灣","北區",25.03,121.56),("BATCH1-TWS","台灣","南區",22.63,120.30),("BATCH1-JP","日本","東京",35.68,139.69)):
+        conn.execute("INSERT OR IGNORE INTO suppliers(supplier_id,name,country,region,latitude,longitude,is_official) VALUES (?,?,?,?,?,?,1)", (sid,f"測試供應商 {country} {region}",country,region,lat,lon))
 
 if __name__ == "__main__":
     raise SystemExit(main())

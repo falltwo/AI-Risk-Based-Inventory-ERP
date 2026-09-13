@@ -30,6 +30,8 @@ def render(
         return
 
     st.markdown("<div class='premium-title'>🌱 供應鏈與風險監控</div>", unsafe_allow_html=True)
+    from frontend.components.news_acceptance import render_news_acceptance
+    render_news_acceptance()
 
     if "analysis" not in sections and "what_if" not in sections:
         render_risk_overview()

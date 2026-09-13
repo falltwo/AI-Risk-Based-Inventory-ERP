@@ -51,3 +51,31 @@ def test_streamlit_failed_news_shows_original_and_disables_registration(tmp_path
     assert len(buttons) == 2 and all(b.disabled for b in buttons)
     assert any("未知" in c.value and "failed" in c.value for c in at.caption)
     assert any("Original body retained" in m.value for m in at.markdown)
+
+
+def test_real_news_snapshot_is_visible_and_replay_uses_captured_items(tmp_path, monkeypatch):
+    import json
+    from backend.isolated_runtime import fixture_news
+    path = prepare(tmp_path, monkeypatch)
+    articles = [dict(country="美國", title=f"Captured article {i}", summary=f"Source description {i}",
+                     url=f"https://publisher.test/article-{i}", source="Publisher", published_at="2026-09-13 10:00") for i in range(6)]
+    capture_path = tmp_path / "capture.json"
+    capture_path.write_text(json.dumps(dict(source="gnews", captured_at="2026-09-13T10:01:00Z", articles=articles)), encoding="utf-8")
+    report_path = tmp_path / "results.json"
+    report_path.write_text(json.dumps(dict(checks=[str(i) for i in range(14)], phases={})), encoding="utf-8")
+    monkeypatch.setenv("ERP_ISOLATED_TEST", "1")
+    monkeypatch.setenv("ERP_NEWS_CAPTURE", str(capture_path))
+    monkeypatch.setenv("ERP_NEWS_ACCEPTANCE", str(report_path))
+    from backend.supply_chain_news import save_news_to_db
+    assert save_news_to_db(articles) == 6
+    assert fixture_news("美國") == articles
+    assert fixture_news("日本") == []
+    at = AppTest.from_string("from frontend.components.news_acceptance import render_news_acceptance\nrender_news_acceptance()", default_timeout=20).run()
+    assert not at.exception
+    assert any("GNews API" in item.value and "模擬" in item.value for item in at.info)
+    assert [m.value for m in at.metric] == ["6", "6", "14 項通過"]
+    assert len(at.dataframe[0].value) == 6
+    assert at.dataframe[0].value["新聞標題"].str.startswith("Captured article").all()
+    at = AppTest.from_string("from frontend.components.risk_dashboard import render_intelligence_gathering\nrender_intelligence_gathering(actor='planner')", default_timeout=20).run()
+    assert not at.exception
+    assert at.button(key="refresh_news_btn").label == "🔁 重播本批真實新聞"

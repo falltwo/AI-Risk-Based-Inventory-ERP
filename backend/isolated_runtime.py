@@ -4,6 +4,13 @@ import os
 import json
 import re
 import socket
+from pathlib import Path
+
+
+def news_capture():
+    """Optional real-source snapshot selected by the local review launcher."""
+    path = os.getenv("ERP_NEWS_CAPTURE", "")
+    return json.loads(Path(path).read_text(encoding="utf-8")) if path else None
 
 
 def block_external_network():
@@ -45,6 +52,10 @@ def block_external_network():
 
 
 def fixture_news(country):
+    capture = news_capture()
+    if capture:
+        from .region_matching import normalize
+        return [dict(a) for a in capture["articles"] if normalize(a.get("country")) == normalize(country)]
     rows = [
         ("zero", "港口恢復營運 [ZERO]", "確認目前無延遲。"),
         ("delay", "港口罷工 [DELAY]", "固定測試事件：延遲五天。"),
