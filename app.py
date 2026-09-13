@@ -302,6 +302,7 @@ from frontend.page_hr import render as render_hr
 from frontend.page_carbon import render as render_carbon
 from frontend.page_supply_chain_risk import render as render_supply_chain_risk
 from frontend.page_ai_assistant import render as render_ai
+from frontend.page_security_audit import render as render_security_audit
 
 if menu_selection == "📊 營運分析看板":
     render_dashboard()
@@ -342,3 +343,6 @@ elif menu_selection == "🌱 供應鏈與風險":
         gemini_model=gemini_model,
         username=principal.username,
     )
+
+elif menu_selection == "🔐 安全管理":
+    render_security_audit(username=principal.username)

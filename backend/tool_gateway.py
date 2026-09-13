@@ -467,11 +467,15 @@ class ToolGateway:
         risk_level = registry.get_risk_level(tool_name)
 
         if risk_level in {"write", "dangerous"} and not protected_po:
-            from backend.access_control import load_principal
+            from backend.access_control import ERP_POLICY_WRITE, load_principal
 
             principal = load_principal(actor or "")
-            if principal is None or principal.role != role:
-                msg = "寫入操作需要與登入身分一致的可驗證提案人。"
+            if (
+                principal is None
+                or principal.role != role
+                or not principal.can(ERP_POLICY_WRITE)
+            ):
+                msg = "寫入操作需要與登入身分一致且具備 capability 的 Principal。"
                 _write_log(tool_name, args, role, msg, success=False)
                 return GatewayResult(status="denied", message=msg)
             actor = principal.username

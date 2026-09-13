@@ -25,6 +25,7 @@ APPROVAL_DECIDE = "approval.decide"
 GLOBAL_APPROVAL_DECIDE = "approval.global.decide"
 ERP_EXCHANGE_EXPORT = "erp.exchange.export"
 ERP_EXCHANGE_RECONCILE = "erp.exchange.reconcile"
+SECURITY_AUDIT_READ = "security.audit.read"
 
 L1_MONITOR = "l1_monitor"
 L2_DECISION = "l2_decision"
@@ -43,6 +44,7 @@ _CAPABILITY_ENTITLEMENT = {
     GLOBAL_APPROVAL_DECIDE: L3_GOVERNED_ACTION,
     ERP_EXCHANGE_EXPORT: L3_GOVERNED_ACTION,
     ERP_EXCHANGE_RECONCILE: L3_GOVERNED_ACTION,
+    SECURITY_AUDIT_READ: L3_GOVERNED_ACTION,
 }
 
 _ALL_CAPABILITIES = frozenset(_CAPABILITY_ENTITLEMENT)
@@ -94,7 +96,8 @@ def capabilities_for_role(role: str) -> set[str]:
 
 
 @dataclass(frozen=True)
-class AccessContext:
+class Principal:
+    """已驗證、且已重新載入組織與 capability 的後端身分。"""
     username: str
     role: str
     name: str
@@ -106,15 +109,19 @@ class AccessContext:
         return capability in self.capabilities
 
 
+# 保留舊名稱，避免既有前端／測試在這次安全遷移中中斷。
+AccessContext = Principal
+
+
 def load_principal(
     username: str, *, conn: sqlite3.Connection | None = None
-) -> AccessContext | None:
+) -> Principal | None:
     """Reload one principal from SQLite; missing identity or membership denies."""
     username = str(username or "").strip()
     if not username:
         return None
 
-    def _load(active_conn: sqlite3.Connection) -> AccessContext | None:
+    def _load(active_conn: sqlite3.Connection) -> Principal | None:
         row = active_conn.execute(
             """
             SELECT u.username, u.role, u.name, membership.organization_id
@@ -148,7 +155,7 @@ def load_principal(
             for capability in capabilities_for_role(row[1])
             if _CAPABILITY_ENTITLEMENT.get(capability) in entitlements
         )
-        return AccessContext(
+        return Principal(
             username=row[0],
             role=row[1],
             name=row[2],

@@ -59,6 +59,23 @@ def init_db():
 
     # 使用者與權限
     c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT, role TEXT, name TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS line_user_identities (
+        line_user_id TEXT PRIMARY KEY,
+        username TEXT NOT NULL UNIQUE,
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS login_attempts (
+        username TEXT PRIMARY KEY,
+        failed_attempts INTEGER NOT NULL DEFAULT 0,
+        window_started_at TEXT,
+        locked_until TEXT
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS auth_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        occurred_at TEXT NOT NULL
+    )''')
     c.execute('''CREATE TABLE IF NOT EXISTS user_organizations (
         username TEXT PRIMARY KEY,
         organization_id TEXT NOT NULL

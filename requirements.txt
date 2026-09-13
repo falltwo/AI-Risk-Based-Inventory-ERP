@@ -13,3 +13,4 @@ line-bot-sdk==3.23.0
 uvicorn==0.48.0
 litellm==1.88.1
 cachetools==5.5.0
+argon2-cffi==25.1.0

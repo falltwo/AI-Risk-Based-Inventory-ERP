@@ -102,12 +102,8 @@ _LINE_GATEWAY_DEFAULT_ROLE = "warehouse"
 
 
 def _get_line_user_role(line_user_id: str) -> str:
-    """查詢 LINE 用戶的 ERP 角色，預設為 warehouse（受限角色）"""
-    try:
-        from backend.database import get_line_user_role
-        return get_line_user_role(line_user_id)
-    except Exception:
-        return _LINE_GATEWAY_DEFAULT_ROLE
+    """LINE 入口不要求帳號綁定，固定使用受限的 warehouse 權限。"""
+    return _LINE_GATEWAY_DEFAULT_ROLE
 
 
 def _build_gateway_function_response(tool_name: str, args: dict, role: str = None) -> tuple[dict, bool]:
@@ -134,6 +130,9 @@ def _build_gateway_function_response(tool_name: str, args: dict, role: str = Non
 
     payload["error"] = gw_result.message or f"Gateway returned status: {gw_result.status}"
     return payload, False
+
+
+LINE_TOOLS = build_line_tools(ALL_TOOLS, registry, role=_LINE_GATEWAY_DEFAULT_ROLE)
 
 
 def _gateway_payload_to_reply(payload: dict) -> str:
@@ -169,9 +168,6 @@ def _write_line_dispatch_log(user_task: str, tool_name: str, args: dict):
         write_dispatch_log(routing, user_task, caller="line_bot")
     except Exception as e:
         print(f"Error writing LINE dispatch log: {e}")
-
-
-LINE_TOOLS = build_line_tools(ALL_TOOLS, registry, role=_LINE_GATEWAY_DEFAULT_ROLE)
 
 
 def _chunk_reply_for_flex(text: str) -> list[str]:
@@ -574,20 +570,22 @@ async def execute_morning_briefing():
     try:
         print("Starting morning briefing generation...")
         prompt = "這是固定的每日早報排程。請只使用 LINE 低權白名單工具，彙整庫存狀態、採購情形、風險事件與碳排，產出【今日營運總結早報】。不得查詢或推測人資、薪資或財務資料。請主動列出應注意的風險或低庫存品項。"
-        
-        reply_text, dashboards = await asyncio.to_thread(get_ai_response, prompt)
-        
-        if not reply_text:
-            reply_text = "今日暫無早報資訊可提供。"
-            
-        reply_msgs = [reply_text_to_flex_message(reply_text, title="☀️ 營運早報主動推播")]
-        
+
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
             sent = 0
             failed = 0
             for user_id in LINE_BRIEFING_USER_IDS:
                 try:
+                    reply_text, _ = await asyncio.to_thread(
+                        get_ai_response, prompt, user_id=user_id,
+                        erp_role=_get_line_user_role(user_id)
+                    )
+                    if not reply_text:
+                        reply_text = "今日暫無早報資訊可提供。"
+                    reply_msgs = [
+                        reply_text_to_flex_message(reply_text, title="☀️ 營運早報主動推播")
+                    ]
                     line_bot_api.push_message(
                         PushMessageRequest(to=user_id, messages=reply_msgs[:5])
                     )
@@ -595,8 +593,15 @@ async def execute_morning_briefing():
                 except Exception as e:
                     failed += 1
                     print(f"Morning briefing push failed for one allowlisted user: {e}")
-            print(f"Morning briefing finished: sent={sent}, failed={failed}.")
-            return {"status": "completed", "sent": sent, "failed": failed}
+            print(
+                "Morning briefing finished: "
+                f"sent={sent}, failed={failed}."
+            )
+            return {
+                "status": "completed",
+                "sent": sent,
+                "failed": failed,
+            }
                 
     except Exception as e:
         print(f"Error in execute_morning_briefing: {e}")
