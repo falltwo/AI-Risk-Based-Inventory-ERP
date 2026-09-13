@@ -321,7 +321,7 @@ def test_planner_news_refresh_applies_heatmap_update(supply_db, monkeypatch):
                 "summary": "Delay expected",
                 "url": "https://example.test/news",
                 "source": "test",
-                "published_at": "2026-07-20 00:00",
+                "published_at": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M"),
                 "relevance_tag": "supply_chain",
             }
         ],
@@ -331,9 +331,10 @@ def test_planner_news_refresh_applies_heatmap_update(supply_db, monkeypatch):
         "batch_infer_affected_region_from_news",
         lambda **kwargs: [
             {
+                "analysis_status": "succeeded",
                 "is_relevant": True,
                 "estimated_delay": 5,
-                "event_type": "delay",
+                "event_type": "交通",
                 "country": "Taiwan",
                 "region": "Taichung",
                 "chinese_summary": "Test summary",
@@ -342,12 +343,8 @@ def test_planner_news_refresh_applies_heatmap_update(supply_db, monkeypatch):
     )
     monkeypatch.setattr(
         risk,
-        "get_heatmap_ai_summary",
-        lambda **kwargs: (
-            "Authorized update",
-            [{"display_name": "Taiwan Taichung", "risk_pct": 88}],
-            [],
-        ),
+        "get_heatmap_ai_analysis",
+        lambda **kwargs: dict(analysis_status="succeeded", summary="Authorized update", updates=[{"display_name": "Taiwan Taichung", "risk_pct": 88}], events=[]),
     )
 
     result = news.refresh_news_for_countries(["Taiwan"], actor="planner")
@@ -367,7 +364,10 @@ def test_news_refresh_does_not_swallow_midflight_authorization_failure(
     supply_db, monkeypatch
 ):
     monkeypatch.setattr("backend.llm_client.llm_available", lambda: True)
-    monkeypatch.setattr(news, "fetch_country_news", lambda *args, **kwargs: [])
+    def revoked_during_fetch(*args, **kwargs):
+        monkeypatch.setattr(news, "require_capability", lambda *a, **k: (_ for _ in ()).throw(PermissionError("entitlement was revoked")))
+        return []
+    monkeypatch.setattr(news, "fetch_country_news", revoked_during_fetch)
     monkeypatch.setattr(
         risk,
         "get_heatmap_ai_summary",

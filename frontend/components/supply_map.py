@@ -1,3 +1,5 @@
+from backend.region_matching import matches_location, split_location
+from backend.supply_chain_risk import build_heatmap_review_rows
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -117,7 +119,7 @@ def render_risk_shortcuts(key: str, heatmap_rows=None, *, actor: str):
                             if pd.isna(ev.get('news_id')):
                                 ev_c = (ev.get('country') or "").strip().lower()
                                 ev_r = (ev.get('region') or "").strip().lower()
-                                if ev_c == c_name and ev_r == r_name:
+                                if matches_location(*split_location(reg['region_key']), ev_r, ev_c):
                                     found_ev = ev
                                     break
                     
@@ -126,10 +128,15 @@ def render_risk_shortcuts(key: str, heatmap_rows=None, *, actor: str):
                     match_suggest = None
                     for sev in s_events:
                         s_r, s_c = (sev.get('region') or "").strip().lower(), (sev.get('country') or "").strip().lower()
-                        if (s_r and s_r in reg_display.lower()) or (s_c and s_c in reg_display.lower()):
+                        if sev.get('impact_days') is not None and matches_location(*split_location(reg['region_key']), s_r, s_c):
                             match_suggest = sev
                             break
                     
+                    if reg.get("estimated_delay") is not None and pd.notna(reg.get("estimated_delay")):
+                        c, r = split_location(reg["region_key"])
+                        match_suggest = dict(country=c, region=r, impact_days=int(reg["estimated_delay"]),
+                                             event_type="其他", description=reg.get("ai_summary") or "已保存的熱圖建議")
+
                     # 判定按鈕狀態
                     btn_state = "add" # 待登錄
                     if found_ev is not None:
@@ -174,9 +181,7 @@ def render_risk_shortcuts(key: str, heatmap_rows=None, *, actor: str):
                             impact_days = match_suggest.get('impact_days', 7)
                             etype = match_suggest.get('event_type', '其他')
                             desc = f"【AI 建議更新】{match_suggest.get('description', '')}"
-                            dn_parts = reg_display.split(" ", 1)
-                            ev_c = dn_parts[0].strip()
-                            ev_r = dn_parts[1].strip() if len(dn_parts) > 1 else ""
+                            ev_c, ev_r = split_location(reg["region_key"])
                             
                             from backend.supply_chain_risk import add_risk_event
                             add_risk_event(
@@ -190,9 +195,7 @@ def render_risk_shortcuts(key: str, heatmap_rows=None, *, actor: str):
                             impact_days = match_suggest.get('impact_days', 7)
                             etype = match_suggest.get('event_type', '其他')
                             desc = f"AI 熱圖分析：{match_suggest.get('description', '')}"
-                            dn_parts = reg_display.split(" ", 1)
-                            ev_c = dn_parts[0].strip()
-                            ev_r = dn_parts[1].strip() if len(dn_parts) > 1 else ""
+                            ev_c, ev_r = split_location(reg["region_key"])
                             from backend.supply_chain_risk import add_risk_event
                             add_risk_event(
                                 etype, ev_r, ev_c, impact_days, desc, actor=actor
@@ -201,12 +204,11 @@ def render_risk_shortcuts(key: str, heatmap_rows=None, *, actor: str):
                             st.toast(f"📍 已啟動 {reg_display} 應變計畫", icon="🤖")
                             st.rerun()
                     else:
+                        manual_days = st.number_input("手動確認延遲天數", min_value=0, max_value=365, value=0, key=f"manual_days_{key}_{i}")
                         if st.button("🏗️ 加入應變計畫", key=f"{key}_heat_ana_manual_{i}_{reg_display}", use_container_width=True):
                             st.session_state["selected_region_for_response"] = reg_display
-                            impact_days, etype, desc = 7, "其他", f"手動加入：偵測到 {reg_display} 高風險。"
-                            dn_parts = reg_display.split(" ", 1)
-                            ev_c = dn_parts[0].strip()
-                            ev_r = dn_parts[1].strip() if len(dn_parts) > 1 else ""
+                            impact_days, etype, desc = manual_days, "其他", f"手動加入：偵測到 {reg_display} 高風險。"
+                            ev_c, ev_r = split_location(reg["region_key"])
                             from backend.supply_chain_risk import add_risk_event
                             add_risk_event(
                                 etype, ev_r, ev_c, impact_days, desc, actor=actor
@@ -229,37 +231,18 @@ def render_risk_shortcuts(key: str, heatmap_rows=None, *, actor: str):
                         impact_amt = get_total_impact_amount(selected_r.get('display_name'))
                         st.markdown(f"<div style='padding-top:8px; color:#666;'>曝險金額: <b>${impact_amt:,.0f}</b></div>", unsafe_allow_html=True)
                     with c3:
+                        persisted_days = selected_r.get("estimated_delay")
+                        confirmed_days = st.number_input("確認延遲天數", min_value=0, max_value=365,
+                            value=int(persisted_days) if persisted_days is not None and pd.notna(persisted_days) else 0,
+                            key=f"{key}_other_days_{selected_r['region_key']}")
                         if st.button("🏗️ 加入應變計畫", key=f"{key}_other_reg_btn", use_container_width=True, type="secondary"):
-                            import re
-                            clean_loc = re.sub(r'[\(\d\.%\)]', '', selected_r['display_name']).strip()
-                            s_events = st.session_state.get("suggested_events", [])
-                            # 更加寬容的匹配
-                            def find_match(r_name, evs):
-                                for e in evs:
-                                    sr, sc = (e.get('region') or "").strip(), (e.get('country') or "").strip()
-                                    if (sr and sr in r_name) or (sc and sc in r_name) or (r_name in sr) or (r_name in sc):
-                                        return e
-                                return None
-
-                            match = find_match(selected_r['display_name'], s_events)
-                            if match:
-                                impact_days = match.get('impact_days', 7)
-                                etype = match.get('event_type', '其他')
-                                desc = f"AI 熱圖分析建議：{match.get('description', '建議登錄應變計畫')}"
-                            else:
-                                impact_days, etype, desc = 7, "其他", f"快速登錄：AI 偵測到 {selected_r['display_name']} 之 {selected_r['risk_pct']}% 地理風險。"
+                            c, r = split_location(selected_r["region_key"])
                             from backend.supply_chain_risk import add_risk_event
-                            new_id = add_risk_event(
-                                etype,
-                                clean_loc,
-                                clean_loc,
-                                impact_days,
-                                desc,
-                                actor=actor,
-                            )
+                            add_risk_event("其他", r, c, confirmed_days,
+                                selected_r.get("ai_summary") or "手動確認的應變計畫", actor=actor)
                             st.session_state["heatmap_needs_refresh"] = True
-                            if match: st.toast(f"📍 已採用 AI 建議之 {impact_days} 天延遲 (類型: {etype})", icon="🤖")
                             st.rerun()
+
 
 def render_supply_chain_map(
     api_key: str,
@@ -281,11 +264,11 @@ def render_supply_chain_map(
     st.markdown("**AI 摘要**")
     news_context = ""
     try:
-        news_list = get_news_from_db(limit=10, order_by_latest=True, within_days=30)
+        news_list = get_news_from_db(limit=10, order_by_latest=True, within_days=30, analyzed_only=True)
         if news_list:
             news_context = "\\n".join([
-                (n.get("title") or "") + " " + (n.get("summary") or "")[:200] + 
-                f" [{n.get('published_at') or n.get('fetched_at') or ''}, 預估延遲: {n.get('estimated_delay') or 0}天]"
+                (n.get("title") or "") + " " + (n.get("analysis_summary") or n.get("summary") or "")[:200] +
+                f" [{n.get('published_at') or n.get('fetched_at') or ''}, 預估延遲: {n.get('estimated_delay') if n.get('estimated_delay') is not None else '未知'}天]"
                 for n in news_list
             ])
     except Exception:
@@ -326,43 +309,12 @@ def render_supply_chain_map(
         
         if heatmap_rows_for_update:
             st.markdown("##### 🎯 審核並套用 AI 風險建議")
-            st.caption("下表依照您的供應商據點清單產生，AI 的建議風險值已對應至每個確切節點。")
+            st.caption("套用會保存各據點的風險與延遲天數；空白代表未知，0 代表確認為零。正式事件需另行登錄。")
             
-            # 建立 AI 更新字典：key 為國家名（或完整節點名），value 為風險百分比
-            ai_risk_by_name: dict = {}
-            for u in h_updates_raw:
-                name = (u.get("display_name") or "").strip()
-                pct = u.get("risk_pct")
-                if name and pct is not None:
-                    ai_risk_by_name[name] = pct
-            
-            # 為每個熱圖節點找出 AI 建議的風險值與延遲天數
-            table_rows = []
-            s_events = st.session_state.get("suggested_events", [])
-            
-            for row in heatmap_rows_for_update:
-                node_name = row.get("display_name", "")
-                node_country = node_name.split(" ")[0] if " " in node_name else node_name
-                
-                # 1. 匹配風險百分比
-                risk_val = ai_risk_by_name.get(node_name) or ai_risk_by_name.get(node_country)
-                
-                # 2. 匹配建議延遲天數 (從 suggested_events 找)
-                suggested_days = 7
-                for sev in s_events:
-                    s_reg, s_cnt = (sev.get('region') or "").strip(), (sev.get('country') or "").strip()
-                    if (s_reg and s_reg in node_name) or (s_cnt and s_cnt in node_name) or (node_name in s_reg) or (node_name in s_cnt):
-                        suggested_days = sev.get('impact_days', 7)
-                        break
-                
-                if risk_val is not None:
-                    table_rows.append({
-                        "套用": True, 
-                        "地區": node_name, 
-                        "預估風險 (%)": float(risk_val),
-                        "預估延遲 (天)": int(suggested_days)
-                    })
-            
+            table_rows = build_heatmap_review_rows(
+                h_updates_raw, st.session_state.get("suggested_events", []), heatmap_rows_for_update
+            )
+
             if table_rows:
                 df_upd = pd.DataFrame(table_rows)
                 edited_risk_df = st.data_editor(
@@ -370,7 +322,7 @@ def render_supply_chain_map(
                     column_config={
                         "套用": st.column_config.CheckboxColumn("是否套用", default=True),
                         "地區": st.column_config.TextColumn("熱點名稱", disabled=True),
-                        "預估風險 (%)": st.column_config.NumberColumn("影響 %", min_value=0, max_value=100, step=1),
+                        "預估風險 (%)": st.column_config.NumberColumn("影響 %", min_value=0, max_value=100, step=1, required=True),
                         "預估延遲 (天)": st.column_config.NumberColumn("延遲天數", min_value=0, max_value=365, step=1)
                     },
                     hide_index=True,
@@ -381,26 +333,17 @@ def render_supply_chain_map(
                 sel_risks = edited_risk_df[edited_risk_df["套用"] == True]
                 if st.button(f"📥 套用打勾的 {len(sel_risks)} 個地區風險至地圖", key="apply_ai_risk_btn", type="primary", disabled=len(sel_risks)==0):
                     from backend.supply_chain_risk import apply_heatmap_updates
-                    final_updates = [{"display_name": r["地區"], "risk_pct": r["預估風險 (%)"]} for _, r in sel_risks.iterrows()]
-                    
-                    # 🧪 關鍵同步：將使用者手動修改的天數寫回 suggested_events
-                    current_suggested = st.session_state.get("suggested_events", [])
-                    for _, edited_row in sel_risks.iterrows():
-                        reg_name = edited_row["地區"]
-                        new_days = edited_row["預估延遲 (天)"]
-                        for sev in current_suggested:
-                            s_reg, s_cnt = (sev.get('region') or "").strip(), (sev.get('country') or "").strip()
-                            if (s_reg and s_reg in reg_name) or (s_cnt and s_cnt in reg_name) or (reg_name in s_reg) or (reg_name in s_cnt):
-                                sev["impact_days"] = int(new_days)
-                                break
-                    st.session_state["suggested_events"] = current_suggested
+                    final_updates = [{"display_name": r["地區"], "risk_pct": r["預估風險 (%)"],
+                                      "estimated_delay": None if pd.isna(r["預估延遲 (天)"]) else int(r["預估延遲 (天)"])}
+                                     for _, r in sel_risks.iterrows()]
 
                     cnt = apply_heatmap_updates(
                         final_updates,
                         st.session_state["heatmap_ai_summary"],
                         actor=actor,
                     )
-                    st.session_state["heatmap_apply_success"] = f"✅ 已成功同步 {cnt} 個地區的風險等級與天數設定！"
+                    st.session_state.pop("suggested_events", None)
+                    st.session_state["heatmap_apply_success"] = f"✅ 已成功同步 {cnt} 個地區的風險與延遲天數至資料庫（尚未登錄正式事件）！"
                     if "heatmap_updates" in st.session_state:
                         del st.session_state["heatmap_updates"]
                     st.rerun()
@@ -434,7 +377,7 @@ def render_supply_chain_map(
                 column_config={
                     "region_key": None,
                     "display_name": st.column_config.TextColumn("熱點名稱", disabled=True),
-                    "risk_pct": st.column_config.NumberColumn("影響 %", min_value=0, max_value=100, step=1)
+                    "risk_pct": st.column_config.NumberColumn("影響 %", min_value=0, max_value=100, step=1, required=True)
                 },
                 hide_index=True,
                 use_container_width=True,
@@ -457,6 +400,7 @@ def render_supply_chain_map(
                                 actor=actor,
                             )
                     st.success("地圖已更新。")
+                    st.rerun()
 
 def render_what_if_analysis(
     api_key: str,

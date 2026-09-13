@@ -170,6 +170,9 @@ def init_db():
         ai_summary TEXT,
         updated_at TEXT
     )''')
+    from .news_store import migrate as migrate_news
+    migrate_news(conn)
+
     c.execute('''CREATE TABLE IF NOT EXISTS esg_targets (id INTEGER PRIMARY KEY AUTOINCREMENT, target_year INTEGER, scope INTEGER, baseline_kg_co2 REAL, target_kg_co2 REAL, note TEXT)''')
     # 永續 ESG：風險管理係數（地區/事件類型/供應商類別 → 風險分數 0–100、權重）
     c.execute('''CREATE TABLE IF NOT EXISTS esg_risk_factors (id INTEGER PRIMARY KEY AUTOINCREMENT, risk_type TEXT, risk_key TEXT, risk_score REAL, weight REAL, note TEXT, updated_at TEXT, UNIQUE(risk_type, risk_key))''')

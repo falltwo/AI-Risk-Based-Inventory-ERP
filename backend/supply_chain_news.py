@@ -45,6 +45,8 @@ def _get_db():
 
 def _get_gnews_api_key() -> Optional[str]:
     """從環境變數或 Streamlit secrets 取得 GNews API Key（選填）。"""
+    if os.getenv("ERP_ISOLATED_TEST") == "1":
+        return None
     key = os.environ.get("GNEWS_API_KEY", "").strip()
     if key:
         return key
@@ -65,14 +67,15 @@ def _fetch_via_gnews_api(country_name: str, api_key: str, max_results: int = 10,
         import requests
     except ImportError:
         return []
-    name_en, code = COUNTRY_MAP.get(country_name, (country_name, None))
-    # 關鍵字：擴充相關範疇確保不漏抓
-    query = f"{name_en} (supply chain OR logistics OR shipping OR export OR tariff OR strike OR port OR pandemic OR war OR shortage OR conflict OR disruption OR natural disaster)"
+    _name_en, code = COUNTRY_MAP.get(country_name, (country_name, None))
+    # 地區由 GNews 的 country 參數篩選；不要把國名放進 q，否則搜尋會
+    # 要求文章正文同時包含國名與供應鏈詞，容易在短時間窗內得到 0 筆。
+    query = "supply chain OR logistics OR shipping OR export OR tariff OR strike OR port OR shortage OR disruption"
     url = "https://gnews.io/api/v4/search"
-    
+
     # 產出 GNews API 格式的時間 (YYYY-MM-DDTHH:mm:SSZ)
     from_date = (datetime.now() - timedelta(days=within_days)).strftime("%Y-%m-%dT00:00:00Z")
-    
+
     params = {
         "q": query,
         "max": max_results,
@@ -81,7 +84,7 @@ def _fetch_via_gnews_api(country_name: str, api_key: str, max_results: int = 10,
         "from": from_date,
     }
     if code:
-        params["country"] = code
+        params["country"] = code.lower()
     try:
         r = requests.get(url, params=params, timeout=15)
         r.raise_for_status()
@@ -104,8 +107,8 @@ def _fetch_via_gnews_api(country_name: str, api_key: str, max_results: int = 10,
                 "relevance_tag": "supply_chain",
             })
         return out
-    except Exception:
-        return []
+    except Exception as exc:
+        raise RuntimeError("News provider request failed") from exc
 
 
 def _fetch_via_rss(country_name: str, max_results: int = 15, within_days: int = 7) -> List[dict]:
@@ -135,7 +138,7 @@ def _fetch_via_rss(country_name: str, max_results: int = 15, within_days: int = 
             if summary:
                 summary = re.sub(r"<[^>]+>", "", summary)[:500]
             pub_date_raw = item.find("pubDate").text if item.find("pubDate") is not None else ""
-            
+
             # 標準化日期格式 (RFC 2822 -> ISO)
             pub_date_iso = ""
             try:
@@ -156,8 +159,8 @@ def _fetch_via_rss(country_name: str, max_results: int = 15, within_days: int = 
                 "relevance_tag": "supply_chain",
             })
         return out
-    except Exception:
-        return []
+    except Exception as exc:
+        raise RuntimeError("News provider request failed") from exc
 
 
 def fetch_country_news(country_name: str, api_key: Optional[str] = None, max_results: int = 10, within_days: int = 7) -> List[dict]:
@@ -165,182 +168,152 @@ def fetch_country_news(country_name: str, api_key: Optional[str] = None, max_res
     取得指定國家可能影響銷售或出貨的即時新聞。
     若有 GNews API Key 則優先使用 API，否則使用 Google News RSS。
     """
+    if os.getenv("ERP_ISOLATED_TEST") == "1":
+        from .isolated_runtime import fixture_news
+        return fixture_news(country_name)[:max_results]
     if api_key:
-        items = _fetch_via_gnews_api(country_name, api_key, max_results, within_days)
-        if items:
-            return items
+        try:
+            items = _fetch_via_gnews_api(country_name, api_key, max_results, within_days)
+            if items:
+                return items
+        except RuntimeError:
+            pass
     return _fetch_via_rss(country_name, max_results, within_days)
 
 
 def save_news_to_db(items: List[dict]) -> int:
-    """將新聞寫入 supply_chain_news 表。"""
-    if not items:
-        return 0
-    db = _get_db()
-    conn = sqlite3.connect(db)
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    n = 0
-    for it in items:
-        # 只存入相關的新聞 (Filter irrelevant already done in refresh_news or here)
-        if not it.get("is_relevant", True):
-            continue
-        try:
-            conn.execute(
-                """INSERT INTO supply_chain_news (country, region, title, summary, url, source, published_at, relevance_tag, fetched_at, category, is_relevant, estimated_delay)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    it.get("country") or "",
-                    it.get("region"),
-                    (it.get("title") or "")[:500],
-                    (it.get("summary") or "")[:1000],
-                    (it.get("url") or "")[:500],
-                    (it.get("source") or "")[:100],
-                    it.get("published_at"),
-                    it.get("relevance_tag"),
-                    now,
-                    it.get("category"),
-                    1 if it.get("is_relevant", True) else 0,
-                    it.get("estimated_delay") or 0,
-                ),
-            )
-            n += 1
-        except Exception:
-            continue
-    conn.commit()
-    conn.close()
-    return n
+    """Retain raw items once; analysis fields are stored separately."""
+    from .news_store import store_raw, store_analysis
+    added = 0
+    with sqlite3.connect(_get_db()) as conn:
+        for item in items:
+            news_id, created = store_raw(conn, item)
+            added += created
+            if "analysis_status" in item:
+                store_analysis(conn, news_id, item)
+    return added
 
 
-def get_news_from_db(
-    country: Optional[str] = None,
-    limit: int = 50,
-    order_by_latest: bool = True,
-    within_days: Optional[int] = None,
-) -> List[dict]:
-    """從資料庫讀取已快取的新聞。order_by_latest=True 依發布/取得時間取最近最新；within_days=30 僅取近 N 天內。"""
-    db = _get_db()
-    conn = sqlite3.connect(db)
-    conn.row_factory = sqlite3.Row
-    order = "ORDER BY COALESCE(published_at, fetched_at) DESC, id DESC LIMIT ?"
-    date_filter = ""
-    params_where = []
-    if within_days is not None and within_days > 0:
-        date_filter = " AND date(COALESCE(published_at, fetched_at)) >= date('now', ?) "
-        params_where.append(f"-{int(within_days)} days")
+def get_news_from_db(country=None, limit=50, order_by_latest=True, within_days=None,
+                     *, analyzed_only=False) -> List[dict]:
+    """Raw content plus explicit analysis fields. Only successful relevant rows feed AI."""
+    clauses, params = [], []
     if country:
-        params = [country] + params_where + [limit]
-        rows = conn.execute(
-            f"""SELECT id, country, region, title, summary, url, source, published_at, relevance_tag, fetched_at, category, estimated_delay
-               FROM supply_chain_news WHERE country = ?{date_filter}{order}""",
-            params,
-        ).fetchall()
-    else:
-        params = params_where + [limit]
-        rows = conn.execute(
-            f"""SELECT id, country, region, title, summary, url, source, published_at, relevance_tag, fetched_at, category, estimated_delay
-               FROM supply_chain_news WHERE 1=1{date_filter}{order}""",
-            params,
-        ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+        clauses.append("country=?")
+        params.append(country)
+    if within_days is not None and within_days > 0:
+        clauses.append("date(COALESCE(NULLIF(published_at,''),fetched_at)) >= date('now',?)")
+        params.append(f"-{int(within_days)} days")
+    if analyzed_only:
+        clauses.append("analysis_status='succeeded' AND is_relevant=1")
+    order = "DESC" if order_by_latest else "ASC"
+    with sqlite3.connect(_get_db()) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(f"SELECT * FROM supply_chain_news WHERE {' AND '.join(clauses) or '1=1'} ORDER BY COALESCE(NULLIF(published_at,''),fetched_at) {order}, id {order} LIMIT ?", (*params, limit)).fetchall()
+    return [dict(row) for row in rows]
 
 
-def refresh_news_for_countries(
-    countries: List[str],
-    gemini_api_key: Optional[str] = None,
-    gnews_api_key: Optional[str] = None,
-    max_per_country: int = 15,
-    within_days: int = 7,
-    gemini_model: str = "gemini-2.5-flash",
-    *,
-    actor: str | None = None,
-) -> dict:
-    """
-    為多個國家平行抓取新聞，並使用批量 AI 歸類以極大化提升效能。
-    """
+def refresh_news_for_countries(countries, gemini_api_key=None, gnews_api_key=None,
+    max_per_country=15, within_days=7, gemini_model="gemini-2.5-flash", *, actor=None):
+    from .job_lock import exclusive_job_lock
     require_capability(actor, RISK_WORKSPACE_WRITE)
-    import concurrent.futures
+    with exclusive_job_lock(_get_db(), "news") as acquired:
+        if not acquired:
+            return {"status": "busy", "saved_count": 0, "updated": 0}
+        return _refresh(countries, gnews_api_key, max_per_country, within_days, actor)
+
+
+def _refresh(countries, gnews_api_key, max_per_country, within_days, actor):
+    from .news_store import store_raw, store_analysis
     from .supply_chain_risk import batch_infer_affected_region_from_news
     from .llm_client import llm_available
-
-    # issue #27：AI 歸類/熱圖摘要改由 .env 模型設定驅動（gemini_api_key 參數棄用）
+    from .risk_validation import failed_analysis
+    from .region_matching import normalize
+    countries = list(dict.fromkeys(normalize(c) for c in countries if str(c or "").strip()))
     ai_enabled = llm_available()
     g_key = gnews_api_key or _get_gnews_api_key()
-    used_gnews = bool(g_key)
-    by_country = {}
-    total_saved = 0
-    total_fetched = 0
-
-    # 1. 平行抓取各國原始新聞 (I/O Bound)
-    def fetch_job(c):
-        return c, fetch_country_news(c, api_key=g_key, max_results=max_per_country, within_days=within_days)
-
-    all_raw_items = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(countries), 10)) as executor:
-        futures = [executor.submit(fetch_job, c) for c in countries]
-        for future in concurrent.futures.as_completed(futures):
-            country, items = future.result()
-            if items:
-                total_fetched += len(items)
-                all_raw_items.append((country, items))
-
-    # 2. 批量進行 AI 分析
+    result = dict(status="succeeded", fetched_count=0, saved_count=0, updated=0,
+                  duplicate_count=0, analyzed_count=0, failed_count=0, pending_count=0,
+                  filtered_count=0, fetch_failed_count=0, by_country={}, used_api=bool(g_key))
+    processed = set()
+    import concurrent.futures
+    fetched = {}
+    if countries:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(countries))) as pool:
+            jobs = {pool.submit(fetch_country_news, c, api_key=g_key, max_results=max_per_country, within_days=within_days): c for c in countries}
+            for future in concurrent.futures.as_completed(jobs):
+                c = jobs[future]
+                try:
+                    fetched[c] = future.result()
+                except Exception:
+                    result["fetch_failed_count"] += 1
+                    result["by_country"][c] = 0
+    for country in countries:
+        items = fetched.get(country, [])
+        result["fetched_count"] += len(items)
+        pending = []
+        result["by_country"][country] = 0
+        require_capability(actor, RISK_WORKSPACE_WRITE)
+        with sqlite3.connect(_get_db()) as conn:
+            for item in items:
+                news_id, created = store_raw(conn, item)
+                result["saved_count"] += int(created)
+                result["by_country"][country] += int(created)
+                result["duplicate_count"] += int(not created)
+                status = conn.execute("SELECT analysis_status FROM supply_chain_news WHERE id=?", (news_id,)).fetchone()[0]
+                if news_id not in processed and status != "succeeded":
+                    raw = conn.execute("SELECT title,summary FROM supply_chain_news WHERE id=?", (news_id,)).fetchone()
+                    pending.append((news_id, f"{raw[0] or ''}\n{raw[1] or ''}"))
+                processed.add(news_id)
+        if not ai_enabled:
+            result["pending_count"] += len(pending)
+            continue
+        if pending:
+            inferred = batch_infer_affected_region_from_news(news_texts=[p[1] for p in pending])
+            require_capability(actor, RISK_WORKSPACE_WRITE)
+            with sqlite3.connect(_get_db()) as conn:
+                for i, (news_id, _) in enumerate(pending):
+                    analysis = inferred[i] if i < len(inferred) else failed_analysis("missing_result")
+                    store_analysis(conn, news_id, analysis)
+                    if analysis.get("analysis_status") == "succeeded":
+                        result["analyzed_count"] += 1
+                        result["filtered_count"] += int(analysis["is_relevant"] is False)
+                    else:
+                        result["failed_count"] += 1
+    # Include retained failures/pending rows even if the next provider fetch omits them.
+    with sqlite3.connect(_get_db()) as conn:
+        exclusions = ",".join("?" for _ in processed) or "NULL"
+        clause = f"AND id NOT IN ({exclusions})" if processed else ""
+        backlog = conn.execute(f"SELECT id,title,summary FROM supply_chain_news WHERE analysis_status IN ('pending','failed') {clause} ORDER BY COALESCE(analyzed_at,fetched_at),id LIMIT 100", sorted(processed)).fetchall()
+    if ai_enabled and backlog:
+        require_capability(actor, RISK_WORKSPACE_WRITE)
+        inferred = batch_infer_affected_region_from_news(news_texts=[f"{r[1] or ''}\n{r[2] or ''}" for r in backlog])
+        require_capability(actor, RISK_WORKSPACE_WRITE)
+        with sqlite3.connect(_get_db()) as conn:
+            for i, row in enumerate(backlog):
+                analysis = inferred[i] if i < len(inferred) else failed_analysis("missing_result")
+                store_analysis(conn, row[0], analysis)
+                result["analyzed_count" if analysis.get("analysis_status") == "succeeded" else "failed_count"] += 1
+    with sqlite3.connect(_get_db()) as conn:
+        result["remaining_analysis_count"] = conn.execute("SELECT COUNT(*) FROM supply_chain_news WHERE analysis_status IN ('pending','failed')").fetchone()[0]
+    result["updated"] = result["saved_count"]
+    if result["failed_count"] or result["fetch_failed_count"]:
+        result["status"] = "partial_failure"
+    elif result["remaining_analysis_count"]:
+        result["status"] = "pending_analysis"
     if ai_enabled:
-        for country, items in all_raw_items:
-            texts = [f"{it.get('title', '')}\n{it.get('summary', '')}" for it in items]
-            inferred_list = batch_infer_affected_region_from_news(news_texts=texts)
-            
-            relevant_items = []
-            for it, inferred in zip(items, inferred_list):
-                # 如果不相關，或者 AI 推估延遲為 0 天，則視為無影響而不抓取
-                if not inferred.get("is_relevant", True) or int(inferred.get("estimated_delay") or 0) <= 0:
-                    continue
-                
-                it["is_relevant"] = True
-                it["category"] = inferred.get("event_type", "其他")
-                it["estimated_delay"] = int(inferred.get("estimated_delay") or 0)
-                
-                if inferred.get("country"):
-                    it["country"] = inferred["country"]
-                if inferred.get("region"):
-                    it["region"] = inferred["region"]
-                if inferred.get("chinese_summary"):
-                    it["summary"] = inferred["chinese_summary"]
-                relevant_items.append(it)
-            
-            n = save_news_to_db(relevant_items)
-            by_country[country] = n
-            total_saved += n
-    else:
-        # 無 API Key 時僅存入
-        for country, items in all_raw_items:
-            n = save_news_to_db(items)
-            by_country[country] = n
-            total_saved += n
-    
-    # 進行熱圖自動更新 (AI Heatmap Update)
-    if ai_enabled:
-        try:
-            from .supply_chain_risk import get_heatmap_ai_summary, apply_heatmap_updates
-            all_news = get_news_from_db(limit=25, order_by_latest=True, within_days=30)
-            news_context = "\n".join([
-                f"{(n.get('title') or '')} {(n.get('summary') or '')[:150]} [{n.get('published_at') or n.get('fetched_at') or ''}]"
-                for n in all_news
-            ])
-            ref_date = datetime.now().strftime("%Y-%m-%d")
-            summary_text, updates, _ = get_heatmap_ai_summary(news_context=news_context, reference_date=ref_date)
-            if updates:
-                apply_heatmap_updates(updates, summary_text, actor=actor)
-        except PermissionError:
-            raise
-        except Exception:
-            pass
-
-    return {
-        "updated": total_saved, 
-        "fetched_count": total_fetched,
-        "saved_count": total_saved,
-        "filtered_count": total_fetched - total_saved,
-        "by_country": by_country, 
-        "used_api": used_gnews
-    }
+        from .supply_chain_risk import get_heatmap_ai_analysis, apply_heatmap_updates, build_heatmap_review_rows, get_risk_heatmap_data
+        eligible = get_news_from_db(limit=25, within_days=30, analyzed_only=True)
+        result["heatmap_status"] = "no_valid_news"
+        if eligible:
+            context = "\n".join(f"{n['title']} {n.get('analysis_summary') or ''} [delay={n.get('estimated_delay')}]" for n in eligible)
+            heatmap = get_heatmap_ai_analysis(news_context=context, reference_date=datetime.now().strftime("%Y-%m-%d"))
+            summary, updates, events = heatmap["summary"], heatmap["updates"], heatmap["events"]
+            if heatmap["analysis_status"] != "succeeded":
+                result["heatmap_status"] = "failed"
+                result["status"] = "partial_failure"
+            else:
+                review = build_heatmap_review_rows(updates, events, get_risk_heatmap_data())
+                apply_heatmap_updates([dict(display_name=r["地區"],risk_pct=r["預估風險 (%)"],estimated_delay=r["預估延遲 (天)"]) for r in review], summary, actor=actor)
+                result["heatmap_status"] = "succeeded"
+    return result

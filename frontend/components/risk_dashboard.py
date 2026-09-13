@@ -1,3 +1,5 @@
+from backend.region_matching import matches_location, split_location
+import os
 import streamlit as st
 import re
 import pandas as pd
@@ -33,7 +35,7 @@ def _auto_refresh_heatmap_ai(api_key, gemini_model):
     from backend.supply_chain_risk import get_heatmap_ai_summary
     from datetime import datetime
     import streamlit as st
-    news_list = get_news_from_db(limit=10, order_by_latest=True, within_days=30)
+    news_list = get_news_from_db(limit=10, order_by_latest=True, within_days=30, analyzed_only=True)
     news_context = ""
     if news_list:
         news_context = "\n".join([
@@ -62,6 +64,9 @@ def render_intelligence_gathering(
     st.subheader("🔍 即時全球情報與事件登錄")
     st.caption("透過 GNews/RSS 抓取全球供應鏈相關新聞，並利用 AI 自動偵測受影響國家、地區與事件類型（戰爭、氣候、罷工等）。")
 
+    from backend.isolated_runtime import news_capture
+    capture = news_capture() if os.getenv("ERP_ISOLATED_TEST") == "1" else None
+
     # 更新即時新聞：依供應商國家從 GNews/RSS 抓取並寫入 DB
     _suppliers = get_suppliers_for_map()
     _countries = []
@@ -71,6 +76,9 @@ def render_intelligence_gathering(
     if not _countries:
         _countries = ["台灣", "日本", "美國", "南韓", "中國", "越南", "墨西哥"]
     
+    if capture:
+        _countries = list(dict.fromkeys(a["country"] for a in capture["articles"]))
+
     col_time, col_cate, col_btn, col_help = st.columns([1, 1, 1, 2])
     with col_time:
         time_options = {"7 天": 7, "30 天": 30, "90 天": 90}
@@ -103,10 +111,12 @@ def render_intelligence_gathering(
         st.caption("系統會過濾不相關新聞，並參考過往紀錄推估延遲。")
     with col_btn:
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("📡 更新即時新聞", key="refresh_news_btn", help="依各供應商國家抓取最近新聞，並由 AI 自動分析類別與延遲天數。"):
+        refresh_label = "🔁 重播本批真實新聞" if capture else "📡 更新即時新聞"
+        refresh_help = "使用已抓取的新聞快照，不重新連線；成功資料不重做逐篇分析。" if capture else "依各供應商國家抓取最近新聞，並由 AI 自動分析類別與延遲天數。"
+        if st.button(refresh_label, key="refresh_news_btn", help=refresh_help):
             with st.status("正在獲獲取供應鏈情報並由 AI 進行分析評分...") as status:
-                status.write("📡 正在平行抓取各國原始新聞與預過濾...")
-                status.write("🧠 正在啟動 Gemini 進行深度風險評估 (約 30-40 秒)...")
+                status.write("正在重播已抓取的真實新聞..." if capture else "📡 正在平行抓取各國原始新聞與預過濾...")
+                status.write("AI 使用模擬回應；不呼叫付費模型。" if os.getenv("ERP_ISOLATED_TEST") == "1" else "🧠 正在啟動模型進行風險評估...")
                 res = refresh_news_for_countries(
                     _countries, 
                     gemini_api_key=api_key or None,
@@ -120,17 +130,17 @@ def render_intelligence_gathering(
                 filtered = res.get("filtered_count", 0)
                 saved = res.get("saved_count", 0)
                 
-                status.update(label=f"✅ 全球情報更新完成！(已掃描 {fetched} 則，AI 過濾掉 {filtered} 則無關情報)", state="complete")
-            st.toast(f"📍 AI 已自動過濾 {filtered} 則不相關新聞，保留 {saved} 則關鍵情報。", icon="🤖")
+                status.update(label=f"情報處理完成：掃描 {fetched}、新增 {saved}、重複 {res.get('duplicate_count', 0)}、分析失敗 {res.get('failed_count', 0)}、待分析 {res.get('pending_count', 0)}",
+                              state="error" if res.get("failed_count") else "complete")
+            st.toast(f"已保存 {saved} 則原始新聞；分析判定無關 {filtered} 則。", icon="📍")
             st.rerun()
 
     # 讀取現有新聞
-    news_list_raw = get_news_from_db(limit=60, order_by_latest=True, within_days=within_days)
+    news_list_raw = get_news_from_db(limit=60, order_by_latest=True, within_days=None if capture else within_days)
     
     # 執行類別過濾與去重
     filtered_news = []
     seen = set()
-    ai_filtered_count = 0
     for n in news_list_raw:
         cat = n.get("category") or "其他"
         if "全部" not in selected_cates and selected_cates and cat not in selected_cates:
@@ -140,21 +150,12 @@ def render_intelligence_gathering(
         if key in seen or (not key[0] and not key[1]):
             continue
         
-        # 3. 延遲過濾 (只抓有實質影響的新聞，排除預估 0 天者)
-        if (n.get("estimated_delay") or 0) <= 0:
-            ai_filtered_count += 1
-            seen.add(key)
-            continue
-            
+        # Include all states for inspection. Only successful, known analysis can register an event.
         seen.add(key)
         filtered_news.append(n)
 
     if not filtered_news:
-        st.info("✅ 目前尚無具有「實質延遲風險 (大於 0 天)」的情報。")
-        if ai_filtered_count > 0:
-            st.caption(f"🤖 AI 在背景已為您處理並過濾了 **{ai_filtered_count}** 筆無顯著影響（預估 0 天延遲）的一般新聞或重複新聞。")
-        else:
-            st.caption("請點擊上方按鈕更新或調整時間/類別篩選條件。")
+        st.info("目前沒有符合篩選條件的新聞，請更新新聞或調整篩選。")
         return
 
     st.markdown("---")
@@ -176,7 +177,7 @@ def render_intelligence_gathering(
         news_options = []
         for n in unregistered_news:
             cat = n.get('category') or '其他'
-            delay = n.get('estimated_delay') or 0
+            delay = n.get('estimated_delay') if n.get('estimated_delay') is not None else '未知'
             title = n.get('title') or '（無標題）'
             news_options.append(f"【{cat} | 預估 {delay}天】{title}")
 
@@ -189,17 +190,18 @@ def render_intelligence_gathering(
             raw_intro = "\n\n".join(p for p in [(chosen.get("title") or "").strip(), (chosen.get("summary") or "").strip()] if p).strip() or "（無簡介）"
             
             # --- 🚀 一鍵批量登錄功能 ---
+            registrable = [n for n in unregistered_news if n.get("analysis_status") == "succeeded" and n.get("is_relevant") == 1 and n.get("estimated_delay") is not None]
             col_bulk, _ = st.columns([1, 2])
             with col_bulk:
-                if st.button("🚀 一鍵登錄全部情報", use_container_width=True, type="primary"):
+                if st.button(f"🚀 登錄已驗證情報 ({len(registrable)} 則)", use_container_width=True, type="primary", disabled=not registrable):
                     with st.status("正在登錄情報...") as status:
                         bulk_count = 0
-                        for n in unregistered_news:
+                        for n in registrable:
                             add_risk_event(
                                 event_type=n.get("category") or "其他",
-                                region=n.get("region") or "",
-                                country=n.get("country") or "",
-                                impact_days=n.get("estimated_delay") or 7,
+                                region=n.get("analysis_region") or "",
+                                country=n.get("analysis_country") or "",
+                                impact_days=n["estimated_delay"],
                                 description=f"【一鍵批量登錄】{n.get('title')}",
                                 news_id=n.get('id'),
                                 actor=actor,
@@ -211,7 +213,10 @@ def render_intelligence_gathering(
 
             # 不再切分兩欄，直接全寬顯示簡介與單筆一鍵登錄按鈕
             st.markdown("**📝 簡介分析**")
-            intro_text = chosen.get("summary") or "（無簡介）"
+            intro_text = chosen.get("analysis_summary") or "（尚無有效分析）"
+            st.caption(f"分析狀態：{chosen.get('analysis_status', 'legacy_unverified')}；延遲：{chosen.get('estimated_delay') if chosen.get('estimated_delay') is not None else '未知'}")
+            with st.expander("原始新聞內容"):
+                st.write(chosen.get("summary") or "（無簡介）")
             st.info(intro_text)
             
             # 選配：點擊後才進行深度翻譯
@@ -229,12 +234,13 @@ def render_intelligence_gathering(
             with col_link:
                 if chosen.get("url"): st.link_button("🔗 查看原文", chosen.get("url"), use_container_width=True)
             with col_reg:
-                def_country = chosen.get("country") or ""
-                def_region = chosen.get("region") or ""
+                def_country = chosen.get("analysis_country") or ""
+                def_region = chosen.get("analysis_region") or ""
                 def_etype = chosen.get("category") or "其他"
-                def_delay = chosen.get("estimated_delay") or 0
+                def_delay = chosen.get("estimated_delay")
+                can_register = chosen.get("analysis_status") == "succeeded" and chosen.get("is_relevant") == 1 and def_delay is not None
                 
-                if st.button(f"🚀 一鍵登錄：{def_etype}風險 (預估延遲 {def_delay} 天)", type="primary", use_container_width=True):
+                if st.button(f"🚀 一鍵登錄：{def_etype}風險 (預估延遲 {def_delay} 天)", type="primary", use_container_width=True, disabled=not can_register):
                     add_risk_event(
                         def_etype,
                         def_region,
@@ -295,32 +301,13 @@ def render_response_execution(
         st.info("目前尚無正式應變事件。請至「步驟 2: 全域風險監控」點擊地圖區域之「加入應變計畫」以啟動分析。")
         return
 
-    # 【核心優化】過濾選單，僅顯示熱圖中具備中高風險 (>20%) 或 AI 有積極建議的地區
-    heatmap_rows = get_risk_heatmap_data()
-    high_risk_names = [hr['display_name'] for hr in (heatmap_rows or []) if (hr.get('risk_pct') or 0) > 20]
-    
-    # 建立 country -> display_name 的查詢字典
-    country_to_display = {}
-    for hr in (heatmap_rows or []):
-        c = (hr.get('display_name') or '').split(' ')[0]
-        if c and c not in country_to_display:
-            country_to_display[c] = hr['display_name']
-    
     event_options = ["--- 請選擇要分析的事件 ---"]
     event_ids = [None]
-    
-    seen_display = set()
     for _, row in events.iterrows():
-        country = (row.get('country') or '').strip()
-        display = country_to_display.get(country) or country or '未知'
-        
-        # 僅顯示高風險區域，或若該區域已經有進入應變狀態，則保留顯示
-        if display in high_risk_names or display in seen_display:
-            if display not in seen_display:
-                event_options.append(f"【{row['event_type']}】{display}")
-                event_ids.append(row['id'])
-                seen_display.add(display)
-    
+        display = f"{row.get('country') or ''} {row.get('region') or ''}".strip() or "未知"
+        event_options.append(f"【{row['event_type']}】{display} (#{row['id']})")
+        event_ids.append(row["id"])
+
     # ── 聯動邏輯：檢查是否有外部 (如地圖/情報) 指令要選中特定事件 ──
     if "resp_active_event_sel" not in st.session_state:
         st.session_state["resp_active_event_sel"] = 0
