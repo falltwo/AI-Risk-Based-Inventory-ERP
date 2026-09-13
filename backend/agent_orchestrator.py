@@ -201,6 +201,11 @@ def _llm(messages, model=None, tools=None, temperature=0.2, json_mode=False,
     用量記帳：每次成功呼叫記一列 llm_usage_logs（tokens + 成本），
     usage_tag 標記用途（route / agent:<id> / aggregate / smalltalk）供歸因。
     """
+    if os.getenv("ERP_ISOLATED_TEST") == "1":
+        from types import SimpleNamespace
+        from .isolated_runtime import fixture_completion
+        msg = SimpleNamespace(content=fixture_completion(messages, usage_tag), tool_calls=None)
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
     kw = {"messages": messages, "temperature": temperature}
     if tools:
         kw["tools"] = tools

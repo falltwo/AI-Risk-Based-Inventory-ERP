@@ -64,24 +64,32 @@ def test_gate_drops_unknown_region():
     assert out == []  # code-side gate：不在清單也不可展開 → 丟棄
 
 
-def test_gate_soft_mode_when_no_suppliers():
+def test_gate_fails_closed_when_no_suppliers():
     fallback = ["（目前無正式供應商據點資料，請跳過風險建議清單）"]
     out = _gate_heatmap_updates([{"地區": "任何地方", "風險": "55%"}], fallback, {})
-    assert out == [{"display_name": "任何地方", "risk_pct": 55.0}]  # 寬鬆模式全收
+    assert out == []  # 無據點或非數字風險不得套用
 
 
 def test_coerce_events_types_and_defaults():
     out = _coerce_heatmap_events([
-        {"類型": "罷工", "地區": "台灣 北區", "國家": "台灣", "延遲天數": "14", "描述": "港口罷工"},
+        {"類型": "罷工", "地區": "台灣 北區", "國家": "台灣", "延遲天數": 14, "描述": "港口罷工"},
         {"類型": None, "延遲天數": "not-a-number"},
     ])
     assert out[0] == {"event_type": "罷工", "region": "台灣 北區", "country": "台灣",
                       "impact_days": 14, "description": "港口罷工"}
-    assert out[1]["event_type"] == "其他" and out[1]["impact_days"] == 14
+    assert len(out) == 1  # 非法天數不再補成 14 天
 
 
-def test_heatmap_flow_end_to_end(monkeypatch):
+def test_heatmap_flow_end_to_end(monkeypatch, tmp_path):
     """整條 get_heatmap_ai_summary：假 JSON 回應 → 三元組契約不變。"""
+    import sqlite3
+    from backend import database, supply_chain_risk
+    path = str(tmp_path / "heatmap-contract.db")
+    monkeypatch.setattr(database, "DB_FILE", path)
+    monkeypatch.setattr(supply_chain_risk, "DB_FILE", path)
+    database.init_db()
+    with sqlite3.connect(path) as conn:
+        conn.execute("INSERT INTO suppliers(supplier_id,name,country,region,is_official) VALUES ('P1P2','Fixture','台灣','北區',1)")
     import backend.llm_client as lc
     monkeypatch.setattr(lc, "complete_text", lambda *a, **kw:
                         '{"摘要": "### 摘要\\n台灣風險升高。", '
