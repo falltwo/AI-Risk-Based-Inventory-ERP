@@ -67,9 +67,10 @@ def _fetch_via_gnews_api(country_name: str, api_key: str, max_results: int = 10,
         import requests
     except ImportError:
         return []
-    name_en, code = COUNTRY_MAP.get(country_name, (country_name, None))
-    # 關鍵字：擴充相關範疇確保不漏抓
-    query = f"{name_en} (supply chain OR logistics OR shipping OR export OR tariff OR strike OR port OR pandemic OR war OR shortage OR conflict OR disruption OR natural disaster)"
+    _name_en, code = COUNTRY_MAP.get(country_name, (country_name, None))
+    # 地區由 GNews 的 country 參數篩選；不要把國名放進 q，否則搜尋會
+    # 要求文章正文同時包含國名與供應鏈詞，容易在短時間窗內得到 0 筆。
+    query = "supply chain OR logistics OR shipping OR export OR tariff OR strike OR port OR shortage OR disruption"
     url = "https://gnews.io/api/v4/search"
 
     # 產出 GNews API 格式的時間 (YYYY-MM-DDTHH:mm:SSZ)
@@ -83,7 +84,7 @@ def _fetch_via_gnews_api(country_name: str, api_key: str, max_results: int = 10,
         "from": from_date,
     }
     if code:
-        params["country"] = code
+        params["country"] = code.lower()
     try:
         r = requests.get(url, params=params, timeout=15)
         r.raise_for_status()
