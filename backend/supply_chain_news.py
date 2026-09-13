@@ -323,12 +323,12 @@ def refresh_news_for_countries(
         try:
             from .supply_chain_risk import get_heatmap_ai_summary, apply_heatmap_updates
             all_news = get_news_from_db(limit=25, order_by_latest=True, within_days=30)
-            news_context = "\n".join([
-                f"{(n.get('title') or '')} {(n.get('summary') or '')[:150]} [{n.get('published_at') or n.get('fetched_at') or ''}]"
-                for n in all_news
-            ])
             ref_date = datetime.now().strftime("%Y-%m-%d")
-            summary_text, updates, _ = get_heatmap_ai_summary(news_context=news_context, reference_date=ref_date)
+            # news_items 讓摘要同時拿到證據（國家/類別/天數）；actor 讓結果落地到
+            # risk_ai_summaries，排程產生的建議事件不再被丟掉，L1/L2 重開頁面都看得到。
+            summary_text, updates, _ = get_heatmap_ai_summary(
+                news_context="", reference_date=ref_date, news_items=all_news, actor=actor,
+            )
             if updates:
                 apply_heatmap_updates(updates, summary_text, actor=actor)
         except PermissionError:

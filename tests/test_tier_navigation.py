@@ -178,7 +178,9 @@ def test_tier_pages_derive_sections_from_live_principal():
 
     assert "principal = load_principal(username)" in risk_source
     assert "sections = risk_sections(principal)" in risk_source
-    assert risk_source.count("actor=principal.username") == 5
+    # L2 五個渲染器 + L1 總覽的兩個呼叫點（單頁／分頁）都必須轉發 live actor
+    assert risk_source.count("actor=principal.username") == 7
+    assert risk_source.count("render_risk_overview(actor=principal.username)") == 2
     assert "principal = load_principal(username)" in exchange_source
     assert "sections = exchange_sections(principal)" in exchange_source
     assert "actor=current_actor" in exchange_source
