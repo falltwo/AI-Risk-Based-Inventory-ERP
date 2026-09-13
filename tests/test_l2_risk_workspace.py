@@ -433,3 +433,19 @@ def test_step3_marks_impacted_pos_with_actor():
     marks = _calls(tree, "update_po_impact")
     assert marks and all(any(k.arg == "actor" for k in c.keywords) for c in marks)
     assert _calls(tree, "get_impacted_pos") and _calls(tree, "get_ai_alternative_suggestions")
+
+
+def test_summary_prompt_never_leaks_nan_regions(l2_db, monkeypatch):
+    """事件 region 為 NULL 時，餵給模型的事件清單不能出現字面 nan。"""
+    import backend.llm_client as lc
+    seen = {}
+
+    def fake(prompt, **kw):
+        seen["prompt"] = prompt if isinstance(prompt, str) else str(prompt)
+        return '{"摘要": "ok", "更新": [], "事件": []}'
+
+    monkeypatch.setattr(lc, "complete_text", fake)
+    risk.add_risk_event("其他", "", "台灣", 7, "無地區", actor="planner")
+    risk.analyze_heatmap_risk([], reference_date="2026-09-13")
+    assert "nan" not in seen["prompt"].lower().replace("financial", "")
+    assert "區域：台灣" in seen["prompt"]

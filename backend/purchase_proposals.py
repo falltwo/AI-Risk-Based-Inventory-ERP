@@ -811,6 +811,7 @@ def list_impacted_purchase_options(*, actor: str) -> list[dict]:
             ORDER BY COALESCE(p.estimated_delay_days, 0) DESC, p.po_id, i.id
             """
         ).fetchall()
+        status_by_line = _proposal_status_by_po_line(conn)
         result = []
         for row in rows:
             item = dict(row)
@@ -820,8 +821,119 @@ def list_impacted_purchase_options(*, actor: str) -> list[dict]:
                 item["product_id"],
                 item["source_po_item_id"],
             )
+            item["proposal"] = status_by_line.get((item["po_id"], int(item["source_po_item_id"])))
             result.append(item)
         return result
+
+
+_PROPOSAL_STATUS_LABELS = {
+    "pending": "待 L3 核准",
+    "approved": "已核准",
+    "rejected": "已拒絕",
+    "unsubmitted": "草稿未送審",
+}
+
+
+def _proposal_status_by_po_line(conn) -> dict[tuple[str, int], dict]:
+    """每條受影響採購明細最新一筆提案的狀態（pending / approved / rejected / unsubmitted）。
+
+    提案本身不存審批狀態（設計如此）；狀態由 operation_id 對回 pending_approvals。
+    同一明細多次提案時取最新建立者。
+    """
+    rows = conn.execute(
+        """
+        SELECT pr.proposal_id, pr.affected_po_id, pr.source_po_item_id, pr.proposed_po_id,
+               pr.alternative_supplier_id, pr.source_event_id, pr.created_at,
+               pa.status, pa.approver, pa.updated_at, pa.reason
+        FROM purchase_proposals pr
+        LEFT JOIN pending_approvals pa
+               ON pa.operation_id = ? || pr.proposal_id || ?
+        ORDER BY pr.created_at DESC, pr.rowid DESC
+        """,
+        (_OPERATION_PREFIX, f":{EXECUTION_CONTRACT_VERSION}"),
+    ).fetchall()
+    out: dict[tuple[str, int], dict] = {}
+    for row in rows:
+        (proposal_id, po_id, item_id, proposed_po_id, alt_supplier, event_id,
+         created_at, status, approver, decided_at, reason) = tuple(row)
+        key = (str(po_id), int(item_id))
+        if key in out:
+            continue
+        status = str(status or "unsubmitted")
+        out[key] = {
+            "proposal_id": proposal_id,
+            "status": status,
+            "label": _PROPOSAL_STATUS_LABELS.get(status, status),
+            "proposed_po_id": proposed_po_id,
+            "alternative_supplier_id": alt_supplier,
+            "source_event_id": event_id,
+            "created_at": created_at,
+            "approver": approver,
+            "decided_at": decided_at if status in {"approved", "rejected"} else None,
+            "reason": reason or "",
+        }
+    return out
+
+
+def proposal_status_summary_by_event(event_ids, *, conn=None) -> dict[int, dict]:
+    """各風險事件底下替代採購提案的狀態計數（L1 告警用；只回計數，不含提案內容）。"""
+    ids = sorted({int(i) for i in (event_ids or []) if i is not None})
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    query = f"""
+        SELECT pr.source_event_id, COALESCE(pa.status, 'unsubmitted'), COUNT(*)
+        FROM purchase_proposals pr
+        LEFT JOIN pending_approvals pa ON pa.operation_id = ? || pr.proposal_id || ?
+        WHERE pr.source_event_id IN ({placeholders})
+        GROUP BY pr.source_event_id, COALESCE(pa.status, 'unsubmitted')
+    """
+    params = (_OPERATION_PREFIX, f":{EXECUTION_CONTRACT_VERSION}", *ids)
+    owned = conn is None
+    conn = conn or sqlite3.connect(database.DB_FILE)
+    try:
+        rows = conn.execute(query, params).fetchall()
+    finally:
+        if owned:
+            conn.close()
+    out: dict[int, dict] = {}
+    for event_id, status, count in rows:
+        entry = out.setdefault(int(event_id), {"pending": 0, "approved": 0, "rejected": 0, "unsubmitted": 0})
+        entry[str(status)] = entry.get(str(status), 0) + int(count)
+    return out
+
+
+def get_purchase_proposal_context(proposal: PurchaseProposal, *, actor: str) -> dict:
+    """審批頁的 L2 證據脈絡：提案所依據的風險事件 + 受影響採購單上的延遲／替代建議註記。
+
+    只讀；需 PROPOSAL_EVIDENCE_READ。找不到事件時 event 為 None（舊提案沒綁事件）。
+    """
+    require_capability(actor, PROPOSAL_EVIDENCE_READ)
+    with sqlite3.connect(database.DB_FILE) as conn:
+        conn.row_factory = sqlite3.Row
+        event = None
+        if proposal.source_event_id is not None:
+            row = conn.execute(
+                """
+                SELECT e.id, e.event_type, e.region, e.country, e.impact_days, e.description,
+                       e.created_at, e.news_id, n.title AS news_title, n.url AS news_url
+                FROM supply_chain_events e
+                LEFT JOIN supply_chain_news n ON n.id = e.news_id
+                WHERE e.id = ?
+                """,
+                (int(proposal.source_event_id),),
+            ).fetchone()
+            event = dict(row) if row else None
+        po = conn.execute(
+            """
+            SELECT p.po_id, p.status, p.total_amount, p.estimated_delay_days, p.alternative_suggestion,
+                   s.name AS supplier_name, s.country, s.region
+            FROM purchase_orders p LEFT JOIN suppliers s ON s.supplier_id = p.supplier_id
+            WHERE p.po_id = ?
+            """,
+            (proposal.affected_po_id,),
+        ).fetchone()
+    return {"event": event, "affected_po": dict(po) if po else None}
 
 
 def list_alternative_suppliers(

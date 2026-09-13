@@ -741,8 +741,11 @@ def analyze_heatmap_risk(
     events_text = "目前尚無已登錄事件。"
     if events_df is not None and not events_df.empty:
         # 只列出最近的 15 筆事件作為背景
+        # region 為 NaN 時 pandas 值為 truthy，原本會把字面 "nan" 餵給模型（模型真的回了「地區欄位為 nan」）
         events_text = "\n".join([
-            f"- 【{row['event_type']}】區域：{row['region'] or row['country']} (預計延遲：{row['impact_days']}天)"
+            f"- 【{_clean_text(row['event_type']) or '其他'}】區域："
+            f"{' '.join(p for p in (_clean_text(row['country']), _clean_text(row['region'])) if p) or '未填'}"
+            f" (預計延遲：{row['impact_days']}天)"
             for _, row in events_df.head(15).iterrows()
         ])
 

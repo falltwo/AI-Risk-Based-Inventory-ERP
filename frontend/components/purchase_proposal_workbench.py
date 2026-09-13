@@ -83,6 +83,35 @@ def _render_submission_state() -> bool:
     return True
 
 
+_BADGES = {"pending": "⏳ ", "approved": "✅ ", "rejected": "❌ "}
+
+
+def _proposal_badge(item: dict) -> str:
+    return _BADGES.get((item.get("proposal") or {}).get("status"), "")
+
+
+def _resolve_source_event(selected: dict) -> dict | None:
+    """步驟 3 選中的事件優先；否則依受影響採購單的供應商地區找最嚴重的正式事件。"""
+    from backend.supply_chain_risk import events_for_location, get_risk_events_list, is_news_event
+
+    active_id = st.session_state.get("active_risk_event_id")
+    try:
+        events = get_risk_events_list(limit=200)
+    except Exception:
+        return None
+    if events is None or events.empty:
+        return None
+    if active_id is not None:
+        hit = events[events["id"] == active_id]
+        if not hit.empty:
+            return hit.iloc[0].to_dict()
+    matched = [
+        ev for ev in events_for_location(selected.get("country") or "", selected.get("region") or "", events)
+        if not is_news_event(ev)
+    ]
+    return matched[0] if matched else None
+
+
 def render_purchase_proposal_workbench(*, actor: str) -> None:
     """Render affected PO evidence, candidate suppliers, and proposal submit."""
     st.subheader("🧾 替代採購決策提案")
@@ -101,11 +130,23 @@ def render_purchase_proposal_workbench(*, actor: str) -> None:
         st.info("目前沒有含延遲或替代建議的受影響採購單。")
         return
 
+    # 閉環：已核准／待審的明細標出來，避免同一條明細重複提案
+    counts = {"pending": 0, "approved": 0, "rejected": 0}
+    for item in impacted:
+        status = (item.get("proposal") or {}).get("status")
+        if status in counts:
+            counts[status] += 1
+    if any(counts.values()):
+        st.caption(
+            f"提案狀態：待核准 {counts['pending']} ・ 已核准 {counts['approved']} ・ 已拒絕 {counts['rejected']}"
+        )
+
     option_keys = list(range(len(impacted)))
     selected_index = st.selectbox(
         "選擇受影響採購品項",
         option_keys,
         format_func=lambda index: (
+            f"{_proposal_badge(impacted[index])}"
             f"{impacted[index]['po_id']}｜"
             f"{impacted[index]['product_id']} {impacted[index].get('product_name') or ''}｜"
             f"明細 #{impacted[index]['source_po_item_id']} × {impacted[index]['qty']}｜"
@@ -115,6 +156,24 @@ def render_purchase_proposal_workbench(*, actor: str) -> None:
         key="purchase_proposal_affected_line",
     )
     selected = impacted[selected_index]
+    existing = selected.get("proposal")
+    if existing and existing.get("status") == "approved":
+        st.success(
+            f"此明細的替代採購提案 `{existing['proposal_id']}` 已由 `{existing.get('approver') or 'L3'}` "
+            f"於 {existing.get('decided_at') or '—'} 核准，替代採購單 `{existing.get('proposed_po_id')}` 已建立。"
+            "如需再次提案請先確認原因。"
+        )
+    elif existing and existing.get("status") == "pending":
+        st.info(f"此明細已有提案 `{existing['proposal_id']}` 待 L3 核准；再送一筆會成為新的提案。")
+    elif existing and existing.get("status") == "rejected":
+        st.warning(
+            f"上一筆提案 `{existing['proposal_id']}` 已被拒絕"
+            + (f"：{existing.get('reason')}" if existing.get("reason") else "")
+            + "。可修正後重新提案。"
+        )
+
+    # 提案綁定風險事件：優先用步驟 3 正在分析的事件，否則依供應商地區找最嚴重的正式事件
+    source_event = _resolve_source_event(selected)
     st.dataframe(
         pd.DataFrame(
             [
@@ -173,6 +232,14 @@ def render_purchase_proposal_workbench(*, actor: str) -> None:
             value=int(selected.get("estimated_delay_days") or 0),
             step=1,
         )
+        if source_event:
+            st.caption(
+                f"依據事件 #{source_event['id']}：{source_event.get('event_type')}｜"
+                f"{source_event.get('country') or ''} {source_event.get('region') or ''}｜"
+                f"預估延遲 {source_event.get('impact_days') or 0} 天（L3 審批頁會看到）"
+            )
+        else:
+            st.caption("找不到對應的正式風險事件；提案仍可送出，但 L3 看不到事件依據。")
         st.caption(f"提案識別碼：`{proposal_id}`")
         if st.form_submit_button(
             "送交 L3 人工核准", type="primary", use_container_width=True
@@ -190,6 +257,7 @@ def render_purchase_proposal_workbench(*, actor: str) -> None:
                     ],
                     reason=reason,
                     estimated_delay_days=int(delay_days),
+                    source_event_id=int(source_event["id"]) if source_event else None,
                     actor=actor,
                 )
                 result = submit_purchase_proposal(proposal, actor=actor)
