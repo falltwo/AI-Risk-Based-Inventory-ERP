@@ -214,6 +214,43 @@ def init_db():
         version INTEGER NOT NULL DEFAULT 0
     )''')
 
+    # AI 決策可驗證性：建議本身、當下證據快照與人員回饋分開保存。
+    # snapshot_json / snapshot_digest 一經建立不再更新，避免事後資料變動
+    # 讓人誤以為 AI 當時是依據新資料做出判斷。
+    c.execute('''CREATE TABLE IF NOT EXISTS decision_records (
+        decision_id TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        decision_type TEXT NOT NULL,
+        model_name TEXT NOT NULL,
+        model_output_json TEXT NOT NULL,
+        output_schema_version INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'proposed',
+        decision_reason TEXT NOT NULL DEFAULT '',
+        decided_by TEXT,
+        decided_at TEXT,
+        created_at TEXT NOT NULL
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS decision_evidence_snapshots (
+        decision_id TEXT PRIMARY KEY,
+        snapshot_json TEXT NOT NULL,
+        snapshot_digest TEXT NOT NULL,
+        data_as_of TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(decision_id) REFERENCES decision_records(decision_id)
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS decision_feedback (
+        feedback_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        decision_id TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        recorded_by TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        FOREIGN KEY(decision_id) REFERENCES decision_records(decision_id)
+    )''')
+    c.execute('''CREATE INDEX IF NOT EXISTS ix_decision_records_created
+        ON decision_records(organization_id, created_at DESC)''')
+
     c.execute('''CREATE TABLE IF NOT EXISTS effect_receipts (
         receipt_id INTEGER PRIMARY KEY AUTOINCREMENT,
         operation_id TEXT NOT NULL UNIQUE,
