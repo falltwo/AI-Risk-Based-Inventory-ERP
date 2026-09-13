@@ -73,8 +73,9 @@ def test_line_gateway_rechecks_execution_boundary():
         Path(__file__).resolve().parents[1] / "line bot" / "bot_server.py"
     ).read_text(encoding="utf-8")
 
-    assert "is_line_tool_allowed(tool_name, registry, role)" in source
-    assert "gateway.call(tool_name, args or {}, role=role)" in source
+    assert "is_line_tool_allowed(tool_name, registry, principal.role)" in source
+    assert "actor=principal.username" in source
+    assert "_get_line_principal(user_id)" in source
 
 
 def test_briefing_user_ids_are_trimmed_and_deduplicated():

@@ -94,7 +94,8 @@ def capabilities_for_role(role: str) -> set[str]:
 
 
 @dataclass(frozen=True)
-class AccessContext:
+class Principal:
+    """已驗證、且已重新載入組織與 capability 的後端身分。"""
     username: str
     role: str
     name: str
@@ -106,15 +107,19 @@ class AccessContext:
         return capability in self.capabilities
 
 
+# 保留舊名稱，避免既有前端／測試在這次安全遷移中中斷。
+AccessContext = Principal
+
+
 def load_principal(
     username: str, *, conn: sqlite3.Connection | None = None
-) -> AccessContext | None:
+) -> Principal | None:
     """Reload one principal from SQLite; missing identity or membership denies."""
     username = str(username or "").strip()
     if not username:
         return None
 
-    def _load(active_conn: sqlite3.Connection) -> AccessContext | None:
+    def _load(active_conn: sqlite3.Connection) -> Principal | None:
         row = active_conn.execute(
             """
             SELECT u.username, u.role, u.name, membership.organization_id
@@ -148,7 +153,7 @@ def load_principal(
             for capability in capabilities_for_role(row[1])
             if _CAPABILITY_ENTITLEMENT.get(capability) in entitlements
         )
-        return AccessContext(
+        return Principal(
             username=row[0],
             role=row[1],
             name=row[2],
@@ -161,6 +166,33 @@ def load_principal(
         return _load(conn)
     with sqlite3.connect(database.DB_FILE) as owned_conn:
         return _load(owned_conn)
+
+
+def resolve_line_principal(
+    line_user_id: str, *, conn: sqlite3.Connection | None = None
+) -> Principal | None:
+    """將 LINE ID 對應為有效 Principal；任何缺漏都預設拒絕。"""
+    line_user_id = str(line_user_id or "").strip()
+    if not line_user_id:
+        return None
+
+    def _resolve(active_conn: sqlite3.Connection) -> Principal | None:
+        try:
+            row = active_conn.execute(
+                """SELECT username FROM line_user_identities
+                   WHERE line_user_id = ? AND enabled = 1""",
+                (line_user_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        if row is None:
+            return None
+        return load_principal(row[0], conn=active_conn)
+
+    if conn is not None:
+        return _resolve(conn)
+    with sqlite3.connect(database.DB_FILE) as owned_conn:
+        return _resolve(owned_conn)
 
 
 def has_capability(
