@@ -1,2 +1,3 @@
 # 開發/測試用依賴（跑系統本身不需要）
+-r requirements-scenario.txt
 pytest==9.1.1

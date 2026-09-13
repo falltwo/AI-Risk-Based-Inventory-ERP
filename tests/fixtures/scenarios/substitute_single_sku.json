@@ -1,0 +1,20 @@
+{
+  "case_id": "CASE-SKU-001",
+  "scenario_id": "substitute",
+  "input_version": 1,
+  "seed": 0,
+  "horizon_days": 20,
+  "sku": "SKU-001",
+  "po_id": "PO-002",
+  "po_quantity": 200.0,
+  "initial_stock": 15.0,
+  "lead_time_days": 2,
+  "holding_cost": 1.0,
+  "stockout_cost": 50.0,
+  "demand": {
+    "type": "D",
+    "demand_list": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+  },
+  "assumption_source": "synthetic-fixture/stockpyl-spike-v1 (hand-computable fixed demand; not enterprise data)",
+  "description": "替代情境：改用替代供應商單張 PO-002（Q=200）於 t=2 一次到貨（介於正常與中斷之間），之後無任何補貨。合成假設，非企業資料。"
+}
