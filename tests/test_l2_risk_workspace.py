@@ -366,3 +366,70 @@ def test_country_event_does_not_light_up_whole_region(l2_db):
     risk.add_risk_event("戰爭", "亞洲", "", 30, "區域衝突", actor="planner")
     assert len(risk.events_for_location("越南", "亞洲")) == 1
     assert len(risk.events_for_location("台灣", "亞洲")) == 2
+
+
+# ── 7. 受影響採購單標記：情報 → 事件 → 標記 → 步驟 5 ──────────────────
+
+
+def _seed_open_po(db_path, po_id="PO-TW-1", supplier="S-TW1", amount=1500.0, product="P-L2"):
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO inventory (product_id, name, stock, daily_sales, reorder_point, baseline_reorder_point) "
+            "VALUES (?, 'L2 物料', 40, 4, 10, 10)", (product,),
+        )
+        conn.execute(
+            "INSERT INTO purchase_orders (po_id, supplier_id, status, total_amount) VALUES (?,?,?,?)",
+            (po_id, supplier, "已下單", amount),
+        )
+        conn.execute(
+            "INSERT INTO purchase_order_items (po_id, product_id, qty, unit_price) VALUES (?,?,?,?)",
+            (po_id, product, 10, amount / 10),
+        )
+        conn.commit()
+
+
+def test_impacted_pos_carry_amount_and_raw_fields(l2_db):
+    _seed_open_po(l2_db)
+    rows = risk.get_impacted_pos(region_key="亞洲", country="台灣")
+    assert [r["po_id"] for r in rows] == ["PO-TW-1"]
+    row = rows[0]
+    assert row["total_amount"] == 1500.0 and row["supplier_id"] == "S-TW1"
+    assert row["estimated_delay_days"] is None and row["alternative_suggestion_raw"] == ""
+    assert "庫存約剩 10 天" in row["key_materials"]
+    assert risk.get_impacted_pos(region_key="歐洲", country="德國") == []
+
+
+def test_planner_marks_po_and_step5_lists_it(l2_db):
+    """整條鏈：登錄事件 → 找到受災採購單 → planner 標記 → 步驟 5 查得到。"""
+    from backend.purchase_proposals import list_impacted_purchase_options
+
+    _seed_open_po(l2_db)
+    risk.add_risk_event("罷工", "亞洲", "台灣", 14, "港口罷工", actor="planner")
+    assert list_impacted_purchase_options(actor="planner") == []   # 標記前步驟 5 是空的
+
+    risk.update_po_impact("PO-TW-1", estimated_delay_days=14,
+                          alternative_suggestion="改由越南倉出貨", actor="planner")
+
+    options = list_impacted_purchase_options(actor="planner")
+    assert [o["po_id"] for o in options] == ["PO-TW-1"]
+    assert options[0]["estimated_delay_days"] == 14
+    assert options[0]["alternative_suggestion"] == "改由越南倉出貨"
+    # 標記後 get_impacted_pos 也帶出既有值，讓 UI 顯示「目前 +14 天」
+    marked = risk.get_impacted_pos(region_key="亞洲", country="台灣")[0]
+    assert marked["estimated_delay"] == "+14 天" and marked["estimated_delay_days"] == 14
+
+
+@pytest.mark.parametrize("actor", [None, "", "viewer", "approver", "nobody"])
+def test_update_po_impact_fails_closed_for_non_workspace_roles(l2_db, actor):
+    _seed_open_po(l2_db)
+    with pytest.raises(PermissionError):
+        risk.update_po_impact("PO-TW-1", estimated_delay_days=9, actor=actor)
+    with sqlite3.connect(l2_db) as conn:
+        assert conn.execute("SELECT estimated_delay_days FROM purchase_orders WHERE po_id='PO-TW-1'").fetchone()[0] is None
+
+
+def test_step3_marks_impacted_pos_with_actor():
+    tree = ast.parse((ROOT / "frontend/components/risk_dashboard.py").read_text(encoding="utf-8"))
+    marks = _calls(tree, "update_po_impact")
+    assert marks and all(any(k.arg == "actor" for k in c.keywords) for c in marks)
+    assert _calls(tree, "get_impacted_pos") and _calls(tree, "get_ai_alternative_suggestions")

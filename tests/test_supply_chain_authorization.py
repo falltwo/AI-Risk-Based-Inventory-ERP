@@ -138,10 +138,11 @@ _WORKSPACE_MUTATIONS = (
     "delete_factor",
     "clear_factors",
     "load_presets",
+    # 採購單延遲／替代建議是給 L3 看的評估註記，不動採購單本體 → L2 workspace
+    "update_po_impact",
 )
 
 _ERP_POLICY_MUTATIONS = (
-    "update_po_impact",
     "increase_stock",
     "restore_stock",
     "update_rop",

@@ -1100,7 +1100,7 @@ def get_impacted_pos(region_key=None, country=None, supplier_id=None):
         params.extend(params_sub)
     q = """
     SELECT p.po_id, p.supplier_id, s.name as supplier_name, s.country, s.region,
-           p.estimated_delay_days, p.alternative_suggestion
+           p.estimated_delay_days, p.alternative_suggestion, p.total_amount, p.status
     FROM purchase_orders p
     JOIN suppliers s ON p.supplier_id = s.supplier_id
     WHERE """ + " AND ".join(where)
@@ -1139,10 +1139,17 @@ def get_impacted_pos(region_key=None, country=None, supplier_id=None):
         alt = str(alt_raw).strip() if (_pd.notna(alt_raw) and alt_raw) else "—"
         out.append({
             "po_id": row["po_id"],
+            "supplier_id": row["supplier_id"],
             "supplier_name": row["supplier_name"],
+            "country": _clean_text(row.get("country")),
+            "region": _clean_text(row.get("region")),
             "key_materials": key_materials,
             "estimated_delay": delay_str,
+            "estimated_delay_days": int(delay) if (delay is not None and delay == delay) else None,
             "alternative_suggestion": alt,
+            "alternative_suggestion_raw": alt if alt != "—" else "",
+            "total_amount": float(row.get("total_amount") or 0) if row.get("total_amount") == row.get("total_amount") else 0.0,
+            "status": _clean_text(row.get("status")),
         })
     conn.close()
     return out
@@ -1151,8 +1158,12 @@ def get_impacted_pos(region_key=None, country=None, supplier_id=None):
 def update_po_impact(
     po_id, estimated_delay_days=None, alternative_suggestion=None, *, actor=None
 ):
-    """更新採購單的預計延遲天數與替代建議。"""
-    require_capability(actor, ERP_POLICY_WRITE)
+    """更新採購單的預計延遲天數與替代建議（風險評估註記）。
+
+    這兩欄是給步驟 5／L3 決策看的證據，不動採購單本體（供應商、金額、狀態），
+    所以歸 RISK_WORKSPACE_WRITE：L2 標記證據、L3 才在提案核准時真正改採購。
+    """
+    require_capability(actor, RISK_WORKSPACE_WRITE)
     conn = sqlite3.connect(DB_FILE)
     if estimated_delay_days is not None:
         conn.execute("UPDATE purchase_orders SET estimated_delay_days = ? WHERE po_id = ?", (estimated_delay_days, po_id))
