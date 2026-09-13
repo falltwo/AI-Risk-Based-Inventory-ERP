@@ -50,6 +50,15 @@ def _ensure_users_table():
               fetch=False)
 
 
+def _auth_events(username: str) -> list[str]:
+    return [
+        row[0]
+        for row in run_query(
+            "SELECT event_type FROM auth_events WHERE username=? ORDER BY id", (username,)
+        )
+    ]
+
+
 def test_check_login_upgrades_legacy_row():
     from backend.auth import check_login
     _ensure_users_table()
@@ -82,6 +91,50 @@ def test_check_login_upgrades_legacy_sha256_row():
     stored = run_query("SELECT password FROM users WHERE username='sha_u'")[0][0]
     assert stored.startswith("$argon2id$")
     assert verify_password("pw123", stored)
+
+
+def test_five_failed_logins_temporarily_lock_an_account():
+    from backend.auth import check_login
+
+    _ensure_users_table()
+    run_query(
+        "INSERT OR REPLACE INTO users VALUES ('locked_u', ?, 'sales', '測試')",
+        (hash_password("correct"),),
+        fetch=False,
+    )
+
+    for _ in range(5):
+        assert check_login("locked_u", "wrong") is None
+
+    attempt = run_query(
+        "SELECT failed_attempts, locked_until FROM login_attempts WHERE username='locked_u'"
+    )[0]
+    assert attempt[0] == 5
+    assert attempt[1] is not None
+    assert check_login("locked_u", "correct") is None
+    assert _auth_events("locked_u") == [
+        "login_failed",
+        "login_failed",
+        "login_failed",
+        "login_failed",
+        "login_locked",
+        "login_blocked_locked",
+    ]
+
+
+def test_successful_login_clears_failed_attempts_and_is_audited():
+    from backend.auth import check_login
+
+    _ensure_users_table()
+    run_query(
+        "INSERT OR REPLACE INTO users VALUES ('clear_u', ?, 'sales', '測試')",
+        (hash_password("correct"),),
+        fetch=False,
+    )
+    assert check_login("clear_u", "wrong") is None
+    assert check_login("clear_u", "correct") is not None
+    assert not run_query("SELECT * FROM login_attempts WHERE username='clear_u'")
+    assert _auth_events("clear_u")[-2:] == ["login_failed", "login_succeeded"]
 
 
 def test_init_db_migrates_legacy_rows():
