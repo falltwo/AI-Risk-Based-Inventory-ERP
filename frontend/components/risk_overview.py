@@ -10,6 +10,7 @@ from backend.erp_exchange import (
 )
 from backend.l1_monitoring import (
     get_latest_event_alerts,
+    get_latest_risk_summary,
     map_purchase_rows_to_events,
 )
 from backend.supply_chain_risk import (
@@ -147,6 +148,47 @@ def _render_latest_event_alerts(*, actor: str) -> None:
         st.caption("待確認情報需由具 L2 權限的人員在「情報與決策」頁登錄後，才會成為正式事件並進入對映。")
 
 
+def _render_latest_ai_summary(*, actor: str) -> None:
+    """L2／排程最近一次產生的 AI 風險摘要（唯讀）。"""
+    st.markdown("#### 🤖 最新 AI 風險摘要")
+    try:
+        latest = get_latest_risk_summary(actor=actor)
+    except PermissionError:
+        st.error("此帳號沒有讀取 AI 風險摘要的權限。")
+        return
+    except sqlite3.Error as exc:
+        show_error("AI 風險摘要讀取失敗", exc)
+        return
+    if not latest:
+        st.info("尚未產生 AI 風險摘要；由 L2 在「情報與決策」按「產生／更新即時風險摘要」或排程更新新聞後產生。")
+        return
+    st.caption(
+        f"產生時間 {latest['generated_at']} ・ 由 {latest.get('actor') or '排程'} 產生 ・ "
+        f"依據 {latest['news_count']} 則新聞、{latest['event_count']} 筆已登錄事件"
+    )
+    with st.container(border=True):
+        st.markdown(latest["summary"])
+    if latest["events"]:
+        st.markdown("**AI 建議事件（待 L2 確認）**")
+        st.dataframe(
+            pd.DataFrame([
+                {
+                    "類型": e.get("event_type") or "其他",
+                    "國家／地區": _location_label(e),
+                    "預估延遲": f"{e.get('impact_days') or 0} 天",
+                    "說明": e.get("description") or "",
+                }
+                for e in latest["events"]
+            ]),
+            width="stretch",
+            hide_index=True,
+        )
+    if latest["audit"]:
+        with st.expander(f"證據檢核：{len(latest['audit'])} 項 AI 建議被略過或調整"):
+            for item in latest["audit"]:
+                st.caption(f"{item.get('kind')}「{item.get('name')}」{item.get('action')}：{item.get('reason')}")
+
+
 def _render_read_only_mapping(events: list[dict]) -> None:
     st.markdown("#### 🔔 L1 告警與通知中心")
     st.caption(
@@ -262,6 +304,9 @@ def render_risk_overview(*, actor: str):
 
     st.markdown("<br>", unsafe_allow_html=True)
     _render_latest_event_alerts(actor=actor)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    _render_latest_ai_summary(actor=actor)
 
     # CSV 對映只比對「已確認」事件；候選情報尚未登錄，不參與對映。
     try:

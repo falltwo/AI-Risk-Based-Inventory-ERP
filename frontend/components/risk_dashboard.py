@@ -29,25 +29,6 @@ def can_write_erp_policy(actor: str) -> bool:
     return has_capability(actor, ERP_POLICY_WRITE)
 
 
-def _auto_refresh_heatmap_ai(api_key, gemini_model):
-    from backend.supply_chain_risk import get_heatmap_ai_summary
-    from datetime import datetime
-    import streamlit as st
-    news_list = get_news_from_db(limit=10, order_by_latest=True, within_days=30)
-    news_context = ""
-    if news_list:
-        news_context = "\n".join([
-            (n.get("title") or "") + " " + (n.get("summary") or "")[:200]
-            for n in news_list
-        ])
-    ref_date = datetime.now().strftime("%Y-%m-%d")
-    s, u, evs = get_heatmap_ai_summary(api_key, news_context, reference_date=ref_date, model=gemini_model)
-    st.session_state["heatmap_ai_summary"] = s
-    st.session_state["heatmap_updates"] = u
-    st.session_state["suggested_events"] = evs
-    if "heatmap_needs_refresh" in st.session_state:
-        del st.session_state["heatmap_needs_refresh"]
-
 def render_intelligence_gathering(
     api_key: str = "",
     gnews_api_key: str = "",

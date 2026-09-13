@@ -317,3 +317,17 @@ def get_latest_event_alerts(
         return _load(conn)
     with sqlite3.connect(database.DB_FILE) as owned_conn:
         return _load(owned_conn)
+
+
+# ── 最新 AI 風險摘要（唯讀） ──────────────────────────────────────────
+
+
+def get_latest_risk_summary(*, actor: str | None, conn: sqlite3.Connection | None = None) -> dict | None:
+    """L2／排程最近一次產生並落地的 AI 風險摘要；L1 只讀、不觸發任何模型呼叫。
+
+    authorization 先於任何資料讀取；缺少 RISK_OVERVIEW_READ 直接拒絕。
+    """
+    require_capability(actor, RISK_OVERVIEW_READ, conn=conn)
+    from backend.supply_chain_risk import get_latest_ai_risk_summary
+
+    return get_latest_ai_risk_summary(conn=conn)

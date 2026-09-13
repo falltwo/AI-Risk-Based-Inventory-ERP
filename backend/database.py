@@ -52,6 +52,44 @@ def _ensure_db_dir():
         os.makedirs(d, exist_ok=True)
 
 
+def is_demo_seed_enabled() -> bool:
+    """合成示範資料（採購單等）只能由環境變數明確啟用，避免污染真實資料。"""
+    return os.getenv("ERP_ENABLE_DEMO_SEED", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _seed_demo_purchase_orders(c) -> int:
+    """為每家正式供應商建一張進行中採購單（含明細）。表非空或無商品時不動作。"""
+    if c.execute("SELECT COUNT(*) FROM purchase_orders").fetchone()[0] > 0:
+        return 0
+    products = c.execute(
+        "SELECT product_id, COALESCE(cost, price, 1000) FROM inventory ORDER BY product_id"
+    ).fetchall()
+    suppliers = c.execute(
+        "SELECT supplier_id FROM suppliers WHERE is_official = 1 ORDER BY supplier_id"
+    ).fetchall()
+    if not products or not suppliers:
+        return 0
+    statuses = ("已下單", "生產中", "運送中")
+    created = 0
+    for idx, (supplier_id,) in enumerate(suppliers):
+        product_id, unit_cost = products[idx % len(products)]
+        qty = 20 + (idx % 5) * 10
+        unit_price = round(float(unit_cost or 1000), 2)
+        po_id = f"PO-DEMO-{idx + 1:03d}"
+        order_date = (datetime.now() - timedelta(days=3 + idx % 12)).strftime("%Y-%m-%d")
+        c.execute(
+            "INSERT OR IGNORE INTO purchase_orders (po_id, supplier_id, order_date, status, total_amount, note) "
+            "VALUES (?,?,?,?,?,?)",
+            (po_id, supplier_id, order_date, statuses[idx % len(statuses)], qty * unit_price, "demo seed"),
+        )
+        c.execute(
+            "INSERT INTO purchase_order_items (po_id, product_id, qty, unit_price) VALUES (?,?,?,?)",
+            (po_id, product_id, qty, unit_price),
+        )
+        created += 1
+    return created
+
+
 def init_db():
     _ensure_db_dir()
     conn = sqlite3.connect(DB_FILE)
@@ -169,6 +207,18 @@ def init_db():
         risk_pct REAL,
         ai_summary TEXT,
         updated_at TEXT
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS risk_ai_summaries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TEXT NOT NULL,
+        actor TEXT,
+        reference_date TEXT,
+        summary TEXT NOT NULL,
+        updates_json TEXT NOT NULL,
+        events_json TEXT NOT NULL,
+        audit_json TEXT NOT NULL,
+        news_count INTEGER DEFAULT 0,
+        event_count INTEGER DEFAULT 0
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS esg_targets (id INTEGER PRIMARY KEY AUTOINCREMENT, target_year INTEGER, scope INTEGER, baseline_kg_co2 REAL, target_kg_co2 REAL, note TEXT)''')
     # 永續 ESG：風險管理係數（地區/事件類型/供應商類別 → 風險分數 0–100、權重）
@@ -739,6 +789,12 @@ def init_db():
         top20 = c.fetchall()
         for row in top20:
             c.execute("UPDATE suppliers SET is_official = 1 WHERE supplier_id=?", (row[0],))
+
+    # Demo 曝險資料：供應鏈風險卡片的「曝險金額」算的是未結採購單，demo 供應商
+    # 原本沒有任何採購單，所有據點永遠 $0。只在明確 opt-in（ERP_ENABLE_DEMO_SEED）
+    # 且採購單表為空時，替正式供應商各建一張進行中的採購單。
+    if is_demo_mode_enabled() and is_demo_seed_enabled():
+        _seed_demo_purchase_orders(c)
 
     # N3：既有 DB 的 legacy 明文密碼一次性升級為 salted hash（自我修復式遷移）
     try:
