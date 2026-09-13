@@ -9,8 +9,8 @@ from .database import run_query
 
 def check_login(username: str, password: str) -> dict | None:
     """驗證帳號密碼，成功回傳 {role, name}，失敗回傳 None。
-    （N3）密碼以 salted hash 比對；遇到 legacy 明文則於登入成功時就地升級。"""
-    from backend.passwords import verify_password, is_hashed, hash_password
+    密碼以 Argon2id 比對；舊 SHA-256 與明文格式會在成功登入時就地升級。"""
+    from backend.passwords import hash_password, needs_password_upgrade, verify_password
 
     rows = run_query(
         "SELECT password, role, name FROM users WHERE username=?",
@@ -21,7 +21,7 @@ def check_login(username: str, password: str) -> dict | None:
     stored, role, name = rows[0]
     if not verify_password(password, stored or ""):
         return None
-    if not is_hashed(stored or ""):  # legacy 明文 → 自我修復式升級
+    if needs_password_upgrade(stored or ""):
         run_query("UPDATE users SET password=? WHERE username=?",
                   (hash_password(password), username), fetch=False)
     return {"role": role, "name": name}
