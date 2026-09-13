@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import sqlite3
 
 from backend import database
-from backend.access_control import RISK_OVERVIEW_READ, require_capability
+from backend.access_control import RISK_ALERT_ACK, RISK_ANALYSIS_READ, RISK_OVERVIEW_READ, require_capability
 
 
 # 告警嚴重度依預估延遲天數分級；L1 只讀不寫，分級規則放在後端以便 LINE / Web 共用。
@@ -275,6 +275,182 @@ def _load_candidate_alerts(conn: sqlite3.Connection, *, since: str, limit: int) 
     return candidates
 
 
+# ── 告警狀態（已讀／處理中／已通知 L2） ────────────────────────────────
+# 監控狀態獨立一張表，不碰事件與新聞本體；L1 每次重整仍直接讀 DB，但狀態會留下來。
+
+ALERT_KIND_CONFIRMED = "confirmed"
+ALERT_KIND_CANDIDATE = "candidate"
+ALERT_STATUS_UNREAD = "未讀"
+ALERT_STATUS_READ = "已讀"
+ALERT_STATUS_IN_PROGRESS = "處理中"
+ALERT_STATUS_NOTIFIED_L2 = "已通知L2"
+CONFIRMED_STATUS_OPTIONS = (ALERT_STATUS_UNREAD, ALERT_STATUS_READ, ALERT_STATUS_IN_PROGRESS)
+CANDIDATE_STATUS_OPTIONS = (ALERT_STATUS_UNREAD, ALERT_STATUS_READ, ALERT_STATUS_NOTIFIED_L2)
+_STATUS_OPTIONS = {
+    ALERT_KIND_CONFIRMED: CONFIRMED_STATUS_OPTIONS,
+    ALERT_KIND_CANDIDATE: CANDIDATE_STATUS_OPTIONS,
+}
+
+
+def _ensure_alert_state_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS risk_alert_states (
+               alert_key TEXT PRIMARY KEY, kind TEXT NOT NULL, ref_id INTEGER NOT NULL,
+               status TEXT NOT NULL, note TEXT, updated_by TEXT, updated_at TEXT NOT NULL)"""
+    )
+
+
+def _alert_key(kind: str, ref_id) -> str:
+    return f"{kind}:{int(ref_id)}"
+
+
+def set_alert_status(kind: str, ref_id, status: str, *, actor: str | None, note: str = "",
+                     conn: sqlite3.Connection | None = None, now: datetime | None = None) -> dict:
+    """L1 標記告警狀態。authorization 先於任何寫入；狀態值必須是該類別允許的選項。"""
+    require_capability(actor, RISK_ALERT_ACK, conn=conn)
+    if kind not in _STATUS_OPTIONS:
+        raise ValueError(f"不支援的告警類別：{kind}")
+    status = _text(status)
+    if status not in _STATUS_OPTIONS[kind]:
+        raise ValueError(f"{kind} 告警不支援狀態「{status}」")
+    record = {
+        "alert_key": _alert_key(kind, ref_id),
+        "kind": kind,
+        "ref_id": int(ref_id),
+        "status": status,
+        "note": _text(note)[:500],
+        "updated_by": actor,
+        "updated_at": (now or datetime.now()).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+    def _write(active_conn: sqlite3.Connection) -> None:
+        _ensure_alert_state_table(active_conn)
+        active_conn.execute(
+            """INSERT INTO risk_alert_states (alert_key, kind, ref_id, status, note, updated_by, updated_at)
+               VALUES (:alert_key, :kind, :ref_id, :status, :note, :updated_by, :updated_at)
+               ON CONFLICT(alert_key) DO UPDATE SET status=excluded.status, note=excluded.note,
+                   updated_by=excluded.updated_by, updated_at=excluded.updated_at""",
+            record,
+        )
+        active_conn.commit()
+
+    if conn is not None:
+        _write(conn)
+    else:
+        with sqlite3.connect(database.DB_FILE) as owned_conn:
+            _write(owned_conn)
+    return record
+
+
+def get_alert_states(kind: str, ref_ids, *, conn: sqlite3.Connection | None = None) -> dict[int, dict]:
+    ids = sorted({int(i) for i in (ref_ids or []) if i is not None})
+    if not ids:
+        return {}
+
+    def _load(active_conn: sqlite3.Connection) -> dict[int, dict]:
+        _ensure_alert_state_table(active_conn)
+        placeholders = ",".join("?" for _ in ids)
+        rows = active_conn.execute(
+            f"""SELECT ref_id, status, note, updated_by, updated_at FROM risk_alert_states
+                WHERE kind = ? AND ref_id IN ({placeholders})""",
+            (kind, *ids),
+        ).fetchall()
+        return {
+            int(ref_id): {"status": status, "note": _text(note), "updated_by": _text(by), "updated_at": _text(at)}
+            for ref_id, status, note, by, at in rows
+        }
+
+    if conn is not None:
+        return _load(conn)
+    with sqlite3.connect(database.DB_FILE) as owned_conn:
+        return _load(owned_conn)
+
+
+def list_l1_notifications_for_l2(*, actor: str | None, conn: sqlite3.Connection | None = None) -> list[dict]:
+    """L1 標成「已通知L2」、而 L2 還沒登錄成事件的情報。L2 頁面頂端提醒用。"""
+    require_capability(actor, RISK_ANALYSIS_READ, conn=conn)
+
+    def _load(active_conn: sqlite3.Connection) -> list[dict]:
+        _ensure_alert_state_table(active_conn)
+        rows = active_conn.execute(
+            """
+            SELECT s.ref_id, s.note, s.updated_by, s.updated_at,
+                   n.title, n.country, n.region, n.category, n.estimated_delay, n.url
+            FROM risk_alert_states s
+            JOIN supply_chain_news n ON n.id = s.ref_id
+            WHERE s.kind = ? AND s.status = ?
+              AND NOT EXISTS (SELECT 1 FROM supply_chain_events e WHERE e.news_id = n.id)
+            ORDER BY s.updated_at DESC
+            """,
+            (ALERT_KIND_CANDIDATE, ALERT_STATUS_NOTIFIED_L2),
+        ).fetchall()
+        return [
+            {
+                "news_id": int(ref_id), "note": _text(note), "notified_by": _text(by), "notified_at": _text(at),
+                "title": _text(title), "country": _text(country), "region": _text(region),
+                "event_type": _text(category) or "其他", "impact_days": _impact_days({"impact_days": delay}),
+                "url": _text(url),
+            }
+            for ref_id, note, by, at, title, country, region, category, delay, url in rows
+        ]
+
+    if conn is not None:
+        return _load(conn)
+    with sqlite3.connect(database.DB_FILE) as owned_conn:
+        return _load(owned_conn)
+
+
+def load_open_purchase_rows(*, actor: str | None, conn: sqlite3.Connection | None = None) -> list[dict]:
+    """系統內未結採購單（一列一品項），格式與 CSV 範本相同，供 L1 對映事件。唯讀。"""
+    require_capability(actor, RISK_OVERVIEW_READ, conn=conn)
+
+    def _load(active_conn: sqlite3.Connection) -> list[dict]:
+        rows = active_conn.execute(
+            """
+            SELECT p.po_id, p.supplier_id, i.product_id, i.qty, p.status, p.order_date, p.total_amount
+            FROM purchase_orders p
+            LEFT JOIN purchase_order_items i ON i.po_id = p.po_id
+            WHERE (p.status IS NULL OR p.status NOT IN ('已完成', '已取消'))
+            ORDER BY p.po_id, i.id
+            """
+        ).fetchall()
+        return [
+            {
+                "external_id": po_id, "po_id": po_id, "supplier_id": _text(supplier_id),
+                "product_id": _text(product_id), "qty": int(qty or 0), "status": _text(status),
+                "order_date": _text(order_date), "total_amount": float(total_amount or 0),
+            }
+            for po_id, supplier_id, product_id, qty, status, order_date, total_amount in rows
+        ]
+
+    if conn is not None:
+        return _load(conn)
+    with sqlite3.connect(database.DB_FILE) as owned_conn:
+        return _load(owned_conn)
+
+
+def _attach_ack_and_proposals(conn: sqlite3.Connection, confirmed: list[dict], candidates: list[dict]) -> None:
+    """把 L1 標記狀態與 L3 提案計數併進告警列（唯讀）。"""
+    from backend.purchase_proposals import proposal_status_summary_by_event
+
+    confirmed_states = get_alert_states(ALERT_KIND_CONFIRMED, [item["id"] for item in confirmed], conn=conn)
+    proposal_counts = proposal_status_summary_by_event([item["id"] for item in confirmed], conn=conn)
+    for item in confirmed:
+        state = confirmed_states.get(int(item["id"]), {})
+        item["ack_status"] = state.get("status") or ALERT_STATUS_UNREAD
+        item["ack_note"] = state.get("note", "")
+        item["ack_by"] = state.get("updated_by", "")
+        item["ack_at"] = state.get("updated_at", "")
+        item["proposals"] = proposal_counts.get(int(item["id"]), {"pending": 0, "approved": 0, "rejected": 0, "unsubmitted": 0})
+    candidate_states = get_alert_states(ALERT_KIND_CANDIDATE, [item["news_id"] for item in candidates], conn=conn)
+    for item in candidates:
+        state = candidate_states.get(int(item["news_id"]), {})
+        item["ack_status"] = state.get("status") or ALERT_STATUS_UNREAD
+        item["ack_note"] = state.get("note", "")
+        item["ack_by"] = state.get("updated_by", "")
+        item["ack_at"] = state.get("updated_at", "")
+
+
 def get_latest_event_alerts(
     *,
     actor: str | None,
@@ -296,6 +472,7 @@ def get_latest_event_alerts(
     def _load(active_conn: sqlite3.Connection) -> dict:
         confirmed = _load_confirmed_alerts(active_conn, since=since, limit=limit)
         candidates = _load_candidate_alerts(active_conn, since=since, limit=limit)
+        _attach_ack_and_proposals(active_conn, confirmed, candidates)
         severities = [item["severity"] for item in confirmed + candidates]
         highest = "無"
         for level in ("高", "中", "低"):

@@ -9,9 +9,16 @@ from backend.erp_exchange import (
     parse_purchase_order_csv,
 )
 from backend.l1_monitoring import (
+    ALERT_KIND_CANDIDATE,
+    ALERT_KIND_CONFIRMED,
+    ALERT_STATUS_NOTIFIED_L2,
+    CANDIDATE_STATUS_OPTIONS,
+    CONFIRMED_STATUS_OPTIONS,
     get_latest_event_alerts,
     get_latest_risk_summary,
+    load_open_purchase_rows,
     map_purchase_rows_to_events,
+    set_alert_status,
 )
 from backend.supply_chain_risk import (
     get_risk_events_list,
@@ -97,35 +104,66 @@ def _render_latest_event_alerts(*, actor: str) -> None:
     if not feed["confirmed"]:
         st.info("此區間內尚無已登錄的供應鏈風險事件。")
     else:
+        unread = sum(1 for item in feed["confirmed"] if item["ack_status"] == "未讀")
+        st.caption(f"未讀 {unread} 筆 ・ 狀態改完按「儲存狀態」，重新整理不會歸零。「替代提案」為 L3 對此事件提案的核准進度。")
         confirmed_rows = [
             {
+                "處理狀態": item["ack_status"],
                 "嚴重度": _SEVERITY_ICONS.get(item["severity"], item["severity"]),
                 "事件": item["event_type"],
                 "國家／地區": _location_label(item),
                 "預估延遲": f"{item['impact_days']} 天",
+                "替代提案": _proposal_label(item.get("proposals") or {}),
                 "登錄時間": item["created_at"] or "未記錄",
                 "來源": item["source"],
                 "來源新聞": item["news_title"] or "—",
                 "原文連結": item["news_url"] or "",
                 "事件說明": item["description"] or "未提供",
+                "備註": item.get("ack_note") or "",
+                "_id": item["id"],
             }
             for item in feed["confirmed"]
         ]
-        st.dataframe(
+        edited = st.data_editor(
             pd.DataFrame(confirmed_rows),
             width="stretch",
             hide_index=True,
+            key=f"l1_confirmed_editor_{since_days}",
+            disabled=[c for c in confirmed_rows[0] if c not in ("處理狀態", "備註")],
             column_config={
+                "處理狀態": st.column_config.SelectboxColumn("處理狀態", options=list(CONFIRMED_STATUS_OPTIONS), required=True),
+                "備註": st.column_config.TextColumn("備註", width="medium"),
                 "原文連結": st.column_config.LinkColumn("原文連結", display_text="開啟"),
+                "_id": None,
             },
         )
+        changed = [
+            (int(row["_id"]), row["處理狀態"], row["備註"])
+            for (_, row), original in zip(edited.iterrows(), confirmed_rows)
+            if row["處理狀態"] != original["處理狀態"] or (row["備註"] or "") != (original["備註"] or "")
+        ]
+        if st.button(f"💾 儲存狀態（{len(changed)} 筆異動）", key="l1_save_confirmed", disabled=not changed):
+            try:
+                for event_id, status, note in changed:
+                    set_alert_status(ALERT_KIND_CONFIRMED, event_id, status, actor=actor, note=note or "")
+            except PermissionError:
+                st.error("此帳號沒有標記告警狀態的權限。")
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                st.toast(f"已更新 {len(changed)} 筆告警狀態", icon="💾")
+                st.rerun()
 
     st.markdown("**AI 偵測待確認**")
     if not feed["candidates"]:
         st.success("此區間內沒有尚未登錄的高風險情報。")
     else:
+        notified = sum(1 for item in feed["candidates"] if item["ack_status"] == ALERT_STATUS_NOTIFIED_L2)
+        st.caption(f"已通知 L2 {notified} 筆。勾選後按「通知 L2」，L2「情報與決策」頁頂端會列出這些情報；L2 登錄成事件後自動從這裡消失。")
         candidate_rows = [
             {
+                "通知 L2": item["ack_status"] == ALERT_STATUS_NOTIFIED_L2,
+                "處理狀態": item["ack_status"],
                 "嚴重度": _SEVERITY_ICONS.get(item["severity"], item["severity"]),
                 "類型": item["event_type"],
                 "國家／地區": _location_label(item),
@@ -134,17 +172,45 @@ def _render_latest_event_alerts(*, actor: str) -> None:
                 "新聞標題": item["title"] or "（無標題）",
                 "原文連結": item["url"] or "",
                 "狀態": item["status"],
+                "備註": item.get("ack_note") or "",
+                "_news_id": item["news_id"],
             }
             for item in feed["candidates"]
         ]
-        st.dataframe(
+        edited = st.data_editor(
             pd.DataFrame(candidate_rows),
             width="stretch",
             hide_index=True,
+            key=f"l1_candidate_editor_{since_days}",
+            disabled=[c for c in candidate_rows[0] if c not in ("通知 L2", "處理狀態", "備註")],
             column_config={
+                "通知 L2": st.column_config.CheckboxColumn("通知 L2"),
+                "處理狀態": st.column_config.SelectboxColumn("處理狀態", options=list(CANDIDATE_STATUS_OPTIONS), required=True),
+                "備註": st.column_config.TextColumn("備註", width="medium"),
                 "原文連結": st.column_config.LinkColumn("原文連結", display_text="開啟"),
+                "_news_id": None,
             },
         )
+        changed = []
+        for (_, row), original in zip(edited.iterrows(), candidate_rows):
+            status = ALERT_STATUS_NOTIFIED_L2 if bool(row["通知 L2"]) else row["處理狀態"]
+            if status == ALERT_STATUS_NOTIFIED_L2 and not bool(row["通知 L2"]):
+                status = "已讀"   # 取消勾選 → 退回已讀
+            if status != original["處理狀態"] or (row["備註"] or "") != (original["備註"] or ""):
+                changed.append((int(row["_news_id"]), status, row["備註"]))
+        notify_count = sum(1 for _, status, _ in changed if status == ALERT_STATUS_NOTIFIED_L2)
+        label = f"📨 通知 L2（{notify_count} 則）" if notify_count else f"💾 儲存狀態（{len(changed)} 筆異動）"
+        if st.button(label, key="l1_save_candidates", disabled=not changed):
+            try:
+                for news_id, status, note in changed:
+                    set_alert_status(ALERT_KIND_CANDIDATE, news_id, status, actor=actor, note=note or "")
+            except PermissionError:
+                st.error("此帳號沒有標記告警狀態的權限。")
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                st.toast(f"已更新 {len(changed)} 筆情報狀態", icon="📨")
+                st.rerun()
         st.caption("待確認情報需由具 L2 權限的人員在「情報與決策」頁登錄後，才會成為正式事件並進入對映。")
 
 
@@ -189,31 +255,67 @@ def _render_latest_ai_summary(*, actor: str) -> None:
                 st.caption(f"{item.get('kind')}「{item.get('name')}」{item.get('action')}：{item.get('reason')}")
 
 
-def _render_read_only_mapping(events: list[dict]) -> None:
+def _proposal_label(counts: dict) -> str:
+    parts = []
+    if counts.get("approved"):
+        parts.append(f"✅ 核准 {counts['approved']}")
+    if counts.get("pending"):
+        parts.append(f"⏳ 待審 {counts['pending']}")
+    if counts.get("rejected"):
+        parts.append(f"❌ 拒絕 {counts['rejected']}")
+    return "、".join(parts) or "—"
+
+
+def _render_read_only_mapping(events: list[dict], *, actor: str) -> None:
     st.markdown("#### 🔔 L1 告警與通知中心")
     st.caption(
-        "上傳資料只會在記憶體中進行格式驗證、事件對映與通知預覽，"
-        "不會寫入 ERP 或提案暫存區。Excel 資料請先另存為 UTF-8 CSV。"
+        "對映只在記憶體中進行：把採購單依供應商地區比對已確認事件，產生通知預覽，"
+        "不會寫入 ERP 或提案暫存區。"
     )
-    st.download_button(
-        "下載唯讀對映 CSV 範本",
-        data=build_purchase_order_template_csv(),
-        file_name="l1_purchase_order_monitoring_template.csv",
-        mime="text/csv",
-        key="l1_monitor_download_template",
+    source = st.radio(
+        "採購資料來源",
+        ("系統內未結採購單", "上傳 CSV"),
+        horizontal=True,
+        key="l1_monitor_source",
     )
-    uploaded = st.file_uploader(
-        "上傳採購資料 CSV",
-        type=["csv"],
-        key="l1_monitor_csv_upload",
-        help="檔案必須為 UTF-8；上傳與對映均不會修改 ERP。",
-    )
-    if uploaded is None:
-        st.info("可下載範本後匯入採購資料，以預覽事件對映與通知結果。")
-        return
+    purchase_rows: list[dict] = []
+    if source == "系統內未結採購單":
+        try:
+            purchase_rows = load_open_purchase_rows(actor=actor)
+        except PermissionError:
+            st.error("此帳號沒有讀取採購單的權限。")
+            return
+        except sqlite3.Error as exc:
+            show_error("採購單讀取失敗", exc)
+            return
+        if not purchase_rows:
+            st.info("系統內目前沒有未結採購單；可改用上傳 CSV 預覽對映。")
+            return
+        st.caption(f"讀取 {len(purchase_rows)} 條未結採購明細（即時，不需上傳）。")
+    else:
+        st.download_button(
+            "下載唯讀對映 CSV 範本",
+            data=build_purchase_order_template_csv(),
+            file_name="l1_purchase_order_monitoring_template.csv",
+            mime="text/csv",
+            key="l1_monitor_download_template",
+        )
+        uploaded = st.file_uploader(
+            "上傳採購資料 CSV",
+            type=["csv"],
+            key="l1_monitor_csv_upload",
+            help="檔案必須為 UTF-8；上傳與對映均不會修改 ERP。",
+        )
+        if uploaded is None:
+            st.info("可下載範本後匯入採購資料，以預覽事件對映與通知結果。")
+            return
+        try:
+            purchase_rows = parse_purchase_order_csv(uploaded.getvalue())
+        except ValueError as exc:
+            st.error(f"CSV 驗證失敗：{exc}")
+            return
 
     try:
-        purchase_rows = parse_purchase_order_csv(uploaded.getvalue())
         supplier_context = _load_supplier_context(
             {row["supplier_id"] for row in purchase_rows}
         )
@@ -317,4 +419,4 @@ def render_risk_overview(*, actor: str):
         events = []
 
     st.markdown("<br>", unsafe_allow_html=True)
-    _render_read_only_mapping(events)
+    _render_read_only_mapping(events, actor=actor)

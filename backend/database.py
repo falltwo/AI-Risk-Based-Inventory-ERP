@@ -208,6 +208,15 @@ def init_db():
         ai_summary TEXT,
         updated_at TEXT
     )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS risk_alert_states (
+        alert_key TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        ref_id INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        note TEXT,
+        updated_by TEXT,
+        updated_at TEXT NOT NULL
+    )''')
     c.execute('''CREATE TABLE IF NOT EXISTS risk_ai_summaries (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         created_at TEXT NOT NULL,

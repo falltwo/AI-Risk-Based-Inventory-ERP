@@ -30,6 +30,32 @@ def can_write_erp_policy(actor: str) -> bool:
     return has_capability(actor, ERP_POLICY_WRITE)
 
 
+def _render_l1_handoff_notices(*, actor: str) -> None:
+    """L1 勾「通知 L2」的待確認情報；登錄成事件後自動消失（唯讀提示）。"""
+    from backend.l1_monitoring import list_l1_notifications_for_l2
+
+    try:
+        notices = list_l1_notifications_for_l2(actor=actor)
+    except PermissionError:
+        return
+    except Exception as exc:
+        show_error("L1 通知讀取失敗", exc)
+        return
+    if not notices:
+        return
+    with st.container(border=True):
+        st.markdown(f"**📨 L1 轉來 {len(notices)} 則待確認情報**（在下方「當前全球情報分析」選取後一鍵登錄即可結案）")
+        for n in notices[:8]:
+            location = " ".join(part for part in (n["country"], n["region"]) if part) or "未填地區"
+            line = (f"- 【{n['event_type']}｜預估 {n['impact_days']} 天】{n['title'] or '（無標題）'} — {location}"
+                    f"｜{n['notified_by'] or 'L1'} 於 {n['notified_at'] or '—'} 通知")
+            if n.get("note"):
+                line += f"｜備註：{n['note']}"
+            st.markdown(line)
+        if len(notices) > 8:
+            st.caption(f"…另有 {len(notices) - 8} 則")
+
+
 def render_intelligence_gathering(
     api_key: str = "",
     gnews_api_key: str = "",
@@ -43,6 +69,7 @@ def render_intelligence_gathering(
     """
     st.subheader("🔍 即時全球情報與事件登錄")
     st.caption("透過 GNews/RSS 抓取全球供應鏈相關新聞，並利用 AI 自動偵測受影響國家、地區與事件類型（戰爭、氣候、罷工等）。")
+    _render_l1_handoff_notices(actor=actor)
 
     # 更新即時新聞：依供應商國家從 GNews/RSS 抓取並寫入 DB
     _suppliers = get_suppliers_for_map()
