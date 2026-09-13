@@ -158,8 +158,7 @@ _SCHEMA_STATEMENTS = (
         )
     )
     BEGIN
-        SELECT RAISE(ABORT, 'decision_case_versions is append-only: '
-                            || 'INSERT OR REPLACE conflict rejected');
+        SELECT RAISE(ABORT, 'decision_case_versions is append-only: INSERT OR REPLACE conflict rejected');
     END
     """,
     """
