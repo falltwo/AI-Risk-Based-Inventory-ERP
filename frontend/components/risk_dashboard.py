@@ -442,12 +442,14 @@ def render_response_execution(
     if "resp_active_event_sel" not in st.session_state:
         st.session_state["resp_active_event_sel"] = 0
 
-    if "active_risk_event_id" in st.session_state:
-        target_id = st.session_state["active_risk_event_id"]
-        if target_id in event_ids:
-            new_idx = event_ids.index(target_id)
-            # 🧪 關鍵修正：若有外部跳轉指令，手動強制覆寫 selectbox 的內部 state
-            st.session_state["resp_active_event_sel"] = new_idx
+    # 外部跳轉（卡片「查看分析」）是一次性指令：取出後就清掉。
+    # 原本用 active_risk_event_id（＝目前選取的鏡像）來強制 selectbox，導致
+    # 使用者在下拉選另一個事件時，rerun 又被拉回上一個，永遠切不過去。
+    target_id = st.session_state.pop("jump_to_risk_event_id", None)
+    if target_id is not None and target_id in event_ids:   # event_ids[0] 是佔位的 None
+        st.session_state["resp_active_event_sel"] = event_ids.index(target_id)
+    elif st.session_state["resp_active_event_sel"] >= len(event_options):
+        st.session_state["resp_active_event_sel"] = 0   # 事件被刪除後索引失效
     
     selected_idx = st.selectbox(
         "選擇要分析與執行的風險事件", 

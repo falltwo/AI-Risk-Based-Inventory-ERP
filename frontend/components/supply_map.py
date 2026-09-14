@@ -205,7 +205,8 @@ def render_risk_shortcuts(key: str, heatmap_rows=None, *, actor: str):
 
             if btn_state == "view":
                 if st.button("📊 查看分析", key=f"{key}_quick_anal_{region_key}_{i}", use_container_width=True, type="secondary"):
-                    st.session_state["active_risk_event_id"] = found_ev["id"]
+                    # 一次性的跳轉指令；active_risk_event_id 只反映目前選取，不用來強制 selectbox
+                    st.session_state["jump_to_risk_event_id"] = found_ev["id"]
                     st.rerun()
             elif btn_state == "update":
                 if st.button("🔄 更新應變建議", key=f"{key}_upd_{region_key}", use_container_width=True, type="primary"):
