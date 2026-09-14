@@ -11,6 +11,8 @@ from backend import database
 from backend.access_control import (
     APPROVAL_DECIDE,
     APPROVAL_QUEUE_READ,
+    DECISION_EVIDENCE_READ,
+    DECISION_RECORD_WRITE,
     ERP_EXCHANGE_EXPORT,
     ERP_EXCHANGE_PROPOSE,
     ERP_EXCHANGE_RECONCILE,
@@ -116,10 +118,12 @@ def test_demo_roles_have_context_visibility_without_inheriting_actions():
     planner = capabilities_for_role("supply_planner")
     approver = capabilities_for_role("procurement_approver")
 
-    assert viewer == {RISK_OVERVIEW_READ}
+    assert viewer == {RISK_OVERVIEW_READ, DECISION_EVIDENCE_READ}
 
     assert {RISK_OVERVIEW_READ, RISK_ANALYSIS_READ, RISK_WHAT_IF_RUN} <= planner
     assert ERP_EXCHANGE_PROPOSE in planner
+    assert DECISION_EVIDENCE_READ in planner
+    assert DECISION_RECORD_WRITE in planner
     assert APPROVAL_DECIDE not in planner
     assert ERP_EXCHANGE_EXPORT not in planner
 
@@ -129,6 +133,8 @@ def test_demo_roles_have_context_visibility_without_inheriting_actions():
     assert APPROVAL_DECIDE in approver
     assert ERP_EXCHANGE_EXPORT in approver
     assert ERP_EXCHANGE_RECONCILE in approver
+    assert DECISION_EVIDENCE_READ in approver
+    assert DECISION_RECORD_WRITE not in approver
     assert RISK_ANALYSIS_READ not in approver
     assert RISK_WHAT_IF_RUN not in approver
     assert ERP_EXCHANGE_PROPOSE not in approver

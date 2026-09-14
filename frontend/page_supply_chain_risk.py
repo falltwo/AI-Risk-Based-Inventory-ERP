@@ -6,12 +6,13 @@ frontend/page_supply_chain_risk.py
 """
 
 import streamlit as st
-from backend.access_control import load_principal
+from backend.access_control import DECISION_EVIDENCE_READ, load_principal
 from frontend.access_navigation import risk_sections
 from frontend.components.supply_map import render_supply_chain_map, render_what_if_analysis
 from frontend.components.risk_dashboard import render_intelligence_gathering, render_response_execution
 from frontend.components.risk_overview import render_risk_overview
 from frontend.components.purchase_proposal_workbench import render_purchase_proposal_workbench
+from frontend.page_decision_evidence import render as render_decision_evidence
 
 def render(
     sub_menu: str,
@@ -31,16 +32,25 @@ def render(
 
     st.markdown("<div class='premium-title'>🌱 供應鏈與風險監控</div>", unsafe_allow_html=True)
 
+    tabs = ["📊 L1 風險總覽"]
+    if principal.can(DECISION_EVIDENCE_READ):
+        tabs.append("🧠 決策證據與回饋")
+    if "analysis" in sections or "what_if" in sections:
+        tabs.append("🧭 L2 情報與決策")
+    rendered_tabs = st.tabs(tabs)
+
+    with rendered_tabs[0]:
+        render_risk_overview()
+
+    evidence_index = 1 if principal.can(DECISION_EVIDENCE_READ) else None
+    if evidence_index is not None:
+        with rendered_tabs[evidence_index]:
+            render_decision_evidence(username=principal.username)
+
+    analysis_index = len(rendered_tabs) - 1
     if "analysis" not in sections and "what_if" not in sections:
-        render_risk_overview()
         return
-
-    overview_tab, analysis_tab = st.tabs(["📊 L1 風險總覽", "🧭 L2 情報與決策"])
-
-    with overview_tab:
-        render_risk_overview()
-
-    with analysis_tab:
+    with rendered_tabs[analysis_index]:
         # Step 1: Intelligence Hub
         st.markdown("### 📡 步驟 1: 即時情報獲取與 AI 摘要")
         render_intelligence_gathering(

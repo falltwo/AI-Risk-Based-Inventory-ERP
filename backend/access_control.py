@@ -25,6 +25,8 @@ APPROVAL_DECIDE = "approval.decide"
 GLOBAL_APPROVAL_DECIDE = "approval.global.decide"
 ERP_EXCHANGE_EXPORT = "erp.exchange.export"
 ERP_EXCHANGE_RECONCILE = "erp.exchange.reconcile"
+DECISION_EVIDENCE_READ = "decision.evidence.read"
+DECISION_RECORD_WRITE = "decision.record.write"
 
 L1_MONITOR = "l1_monitor"
 L2_DECISION = "l2_decision"
@@ -43,13 +45,15 @@ _CAPABILITY_ENTITLEMENT = {
     GLOBAL_APPROVAL_DECIDE: L3_GOVERNED_ACTION,
     ERP_EXCHANGE_EXPORT: L3_GOVERNED_ACTION,
     ERP_EXCHANGE_RECONCILE: L3_GOVERNED_ACTION,
+    DECISION_EVIDENCE_READ: L1_MONITOR,
+    DECISION_RECORD_WRITE: L2_DECISION,
 }
 
 _ALL_CAPABILITIES = frozenset(_CAPABILITY_ENTITLEMENT)
 
 
 _ROLE_CAPABILITIES = {
-    "risk_viewer": frozenset({RISK_OVERVIEW_READ}),
+    "risk_viewer": frozenset({RISK_OVERVIEW_READ, DECISION_EVIDENCE_READ}),
     "supply_planner": frozenset(
         {
             RISK_OVERVIEW_READ,
@@ -57,6 +61,8 @@ _ROLE_CAPABILITIES = {
             RISK_WHAT_IF_RUN,
             RISK_WORKSPACE_WRITE,
             ERP_EXCHANGE_PROPOSE,
+            DECISION_EVIDENCE_READ,
+            DECISION_RECORD_WRITE,
         }
     ),
     "procurement_approver": frozenset(
@@ -67,6 +73,7 @@ _ROLE_CAPABILITIES = {
             APPROVAL_DECIDE,
             ERP_EXCHANGE_EXPORT,
             ERP_EXCHANGE_RECONCILE,
+            DECISION_EVIDENCE_READ,
         }
     ),
     # Preserve the existing demo accounts while routing the new accounts
@@ -82,6 +89,8 @@ _ROLE_CAPABILITIES = {
             APPROVAL_QUEUE_READ,
             ERP_EXCHANGE_EXPORT,
             ERP_EXCHANGE_RECONCILE,
+            DECISION_EVIDENCE_READ,
+            DECISION_RECORD_WRITE,
         }
     ),
     "admin": _ALL_CAPABILITIES,

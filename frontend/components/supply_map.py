@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+from datetime import datetime, timezone
 from backend.supply_chain_news import get_news_from_db
 from backend.supply_chain_risk import (
     get_risk_heatmap_data,
@@ -11,7 +12,7 @@ from backend.supply_chain_risk import (
     get_impacted_pos,
     update_po_impact,
     get_ai_alternative_suggestions,
-    what_if_simulation,
+    what_if_decision_analysis,
 )
 
 
@@ -69,6 +70,28 @@ def render_risk_heatmap(key: str = "risk_heatmap", heatmap_rows=None):
             coloraxis_colorbar=dict(title="影響 %"),
         )
         st.plotly_chart(fig, use_container_width=True, key=key)
+
+
+def _render_heatmap_data_freshness(heatmap_rows) -> None:
+    """在既有地圖下說明風險數值的來源與最近更新時間。"""
+    st.caption("資料來源：供應商據點、已登錄風險事件、地區風險係數與區域採購集中度。")
+    timestamps = []
+    for row in heatmap_rows:
+        value = row.get("updated_at")
+        if not value:
+            continue
+        try:
+            timestamps.append(datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc))
+        except ValueError:
+            continue
+    if not timestamps:
+        st.caption("資料時間：依目前 ERP 資料即時計算；尚無 AI 摘要更新時間。")
+        return
+    newest = max(timestamps)
+    age = datetime.now(timezone.utc) - newest
+    st.caption(f"最近 AI 摘要更新：{newest.isoformat(timespec='seconds')}（UTC）")
+    if age.total_seconds() > 24 * 60 * 60:
+        st.warning("這份 AI 風險摘要已超過 24 小時未更新；請先更新情報或重新產生摘要，再據此做決策。")
 
 def render_risk_shortcuts(key: str, heatmap_rows=None, *, actor: str):
     """區域風險快速分析小卡。"""
@@ -276,6 +299,31 @@ def render_supply_chain_map(
 
     # ── 即時風險熱圖 (Risk Heatmap) ─────────────────────────────────
     render_risk_heatmap(key="detail_heatmap", heatmap_rows=heatmap_rows)
+    _render_heatmap_data_freshness(heatmap_rows)
+
+    # 高風險供應據點可直接送入既有的「決策證據與回饋」流程，但不直接執行採購。
+    high_risk_nodes = [row for row in heatmap_rows if float(row.get("risk_pct") or 0) >= 70]
+    if high_risk_nodes:
+        with st.expander("🚨 建立高風險供應據點預警", expanded=False):
+            st.caption("選取風險達 70% 以上的據點，建立待人員覆核的決策草稿。")
+            node_by_label = {
+                f"{row['display_name']}（風險 {float(row.get('risk_pct') or 0):.0f}%）": row
+                for row in high_risk_nodes
+            }
+            selected_label = st.selectbox("高風險供應據點", list(node_by_label), key="heatmap_alert_node")
+            if st.button("🧾 建立高風險預警草稿", key="heatmap_to_decision"):
+                from backend.decision_evidence import build_heatmap_alert_draft
+                row = node_by_label[selected_label]
+                try:
+                    st.session_state["decision_prefill_pending"] = build_heatmap_alert_draft(
+                        region_name=row["display_name"],
+                        risk_score=float(row.get("risk_pct") or 0),
+                        ai_summary=row.get("ai_summary"),
+                        data_as_of=row.get("updated_at"),
+                    )
+                    st.success("已建立預警草稿；請到「決策證據與回饋」確認後建立正式紀錄。")
+                except ValueError as exc:
+                    st.error(str(exc))
 
     # AI 摘要（使用最近最新新聞）
     st.markdown("**AI 摘要**")
@@ -490,13 +538,28 @@ def render_what_if_analysis(
             key="whatif_question"
         )
         if st.button("執行 What-If 模擬分析", key="whatif_btn"):
-            with st.spinner("AI 正在依供應商、採購單與庫存資料分析情境…"):
-                answer = what_if_simulation(
-                    api_key, user_question, model=gemini_model, actor=actor
+            try:
+                with st.spinner("AI 正在依供應商、採購單與庫存資料分析情境…"):
+                    draft = what_if_decision_analysis(
+                        api_key, user_question, model=gemini_model, actor=actor
+                    )
+                st.markdown("**AI 判斷與依據**")
+                clean_answer = draft["ai_output"]["reasoning"]
+                st.info(clean_answer)
+                st.caption(
+                    f"AI 建議：{draft['ai_output']['recommendation']}｜"
+                    f"風險等級：{draft['ai_output']['risk_level']}｜"
+                    f"風險分數：{draft['evidence_snapshot']['risk_score']:.0f}/100"
                 )
-            st.markdown("**AI 回覆**")
-            # 隱藏技術後綴
-            clean_answer = answer.split("【自動化指令】")[0].strip()
-            st.info(clean_answer)
-            st.caption("範例回覆：「這將影響您 40% 的原材料供應。建議現在就將 X 物料的安全庫存從 30 天提高到 60 天。」")
+                st.caption("範例回覆：「這將影響您 40% 的原材料供應。建議現在就將 X 物料的安全庫存從 30 天提高到 60 天。」")
+                st.session_state["whatif_decision_draft"] = draft
+            except (ValueError, PermissionError) as exc:
+                st.error(str(exc))
+
+        draft = st.session_state.get("whatif_decision_draft")
+        if draft:
+            st.success("已準備好可驗證的決策草稿；請先覆核風險分數與受影響項目，再送出供人員決定。")
+            if st.button("🧾 將此分析帶入『決策證據與回饋』", key="whatif_to_decision"):
+                st.session_state["decision_prefill_pending"] = draft
+                st.rerun()
 

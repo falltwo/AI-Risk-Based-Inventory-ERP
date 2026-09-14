@@ -248,6 +248,20 @@ def test_authorized_roles_can_run_what_if(supply_db, monkeypatch, actor):
     assert len(llm_calls) == 1
 
 
+def test_what_if_can_return_a_validated_ai_decision_draft(supply_db, monkeypatch):
+    monkeypatch.setattr(
+        "backend.llm_client.complete_text",
+        lambda *args, **kwargs: '''{"recommendation":"request_review","risk_level":"high","risk_score":82,"affected_entity":"PO-101 / SUP-021","reasoning":"交期與庫存風險升高。","limitations":"需確認供應商最新復工日期。"}''',
+    )
+
+    draft = risk.what_if_decision_analysis("", "台灣地震造成停工", actor="planner")
+
+    assert draft["ai_output"]["recommendation"] == "request_review"
+    assert draft["ai_output"]["risk_level"] == "high"
+    assert draft["evidence_snapshot"]["risk_score"] == 82
+    assert draft["evidence_snapshot"]["affected_entity"] == "PO-101 / SUP-021"
+
+
 def test_entitlement_revocation_is_immediate(supply_db, monkeypatch):
     llm_calls = []
 
