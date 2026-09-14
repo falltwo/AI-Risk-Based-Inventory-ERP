@@ -3,6 +3,7 @@ import pytest
 from backend import database
 from backend.decision_evidence import (
     add_outcome_feedback,
+    build_heatmap_alert_draft,
     build_what_if_decision_draft,
     create_decision_record,
     decide_decision_record,
@@ -90,6 +91,22 @@ def test_what_if_response_becomes_reviewable_but_unpersisted_draft():
         build_what_if_decision_draft(
             question="測試", answer="模擬分析暫時無法產生：缺少金鑰", model_name="gemini/test"
         )
+
+
+def test_high_risk_heatmap_node_becomes_reviewable_alert_draft():
+    draft = build_heatmap_alert_draft(
+        region_name="越南 東南亞",
+        risk_score=88,
+        ai_summary="港口罷工可能延誤零件交期。",
+        data_as_of="2026-09-14T12:00:00+00:00",
+    )
+    assert draft["decision_type"] == "supply_chain_heatmap_alert"
+    assert draft["ai_output"]["recommendation"] == "propose_alternative_purchase"
+    assert draft["evidence_snapshot"]["risk_score"] == 88
+    assert draft["ai_output"] == validate_ai_output(draft["ai_output"])
+
+    with pytest.raises(ValueError, match="達 70"):
+        build_heatmap_alert_draft(region_name="台灣 東亞", risk_score=69)
 
 
 def test_viewer_cannot_create_or_decide_and_adopted_record_accepts_feedback(decision_db):

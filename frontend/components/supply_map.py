@@ -277,6 +277,30 @@ def render_supply_chain_map(
     # ── 即時風險熱圖 (Risk Heatmap) ─────────────────────────────────
     render_risk_heatmap(key="detail_heatmap", heatmap_rows=heatmap_rows)
 
+    # 高風險供應據點可直接送入既有的「決策證據與回饋」流程，但不直接執行採購。
+    high_risk_nodes = [row for row in heatmap_rows if float(row.get("risk_pct") or 0) >= 70]
+    if high_risk_nodes:
+        with st.expander("🚨 建立高風險供應據點預警", expanded=False):
+            st.caption("選取風險達 70% 以上的據點，建立待人員覆核的決策草稿。")
+            node_by_label = {
+                f"{row['display_name']}（風險 {float(row.get('risk_pct') or 0):.0f}%）": row
+                for row in high_risk_nodes
+            }
+            selected_label = st.selectbox("高風險供應據點", list(node_by_label), key="heatmap_alert_node")
+            if st.button("🧾 建立高風險預警草稿", key="heatmap_to_decision"):
+                from backend.decision_evidence import build_heatmap_alert_draft
+                row = node_by_label[selected_label]
+                try:
+                    st.session_state["decision_prefill_pending"] = build_heatmap_alert_draft(
+                        region_name=row["display_name"],
+                        risk_score=float(row.get("risk_pct") or 0),
+                        ai_summary=row.get("ai_summary"),
+                        data_as_of=row.get("updated_at"),
+                    )
+                    st.success("已建立預警草稿；請到「決策證據與回饋」確認後建立正式紀錄。")
+                except ValueError as exc:
+                    st.error(str(exc))
+
     # AI 摘要（使用最近最新新聞）
     st.markdown("**AI 摘要**")
     news_context = ""

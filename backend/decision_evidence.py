@@ -93,6 +93,46 @@ def build_what_if_decision_draft(
     }
 
 
+def build_heatmap_alert_draft(
+    *,
+    region_name: str,
+    risk_score: float,
+    ai_summary: str | None = None,
+    data_as_of: str | None = None,
+) -> dict[str, Any]:
+    """Create an unpersisted alert draft from a high-risk supply-map node."""
+    region_name = str(region_name or "").strip()
+    if not region_name:
+        raise ValueError("高風險預警需要供應商據點名稱。")
+    if isinstance(risk_score, bool) or not isinstance(risk_score, (int, float)) or not 0 <= risk_score <= 100:
+        raise ValueError("高風險預警的分數必須是 0 到 100。")
+    score = float(risk_score)
+    if score < 70:
+        raise ValueError("只有風險分數達 70 的供應據點可建立高風險預警。")
+    captured_at = str(data_as_of or _now()).strip()
+    recommendation = "propose_alternative_purchase" if score >= 85 else "request_review"
+    reasoning = str(ai_summary or "").strip() or (
+        f"供應鏈風險地圖顯示「{region_name}」的影響程度為 {score:.0f}%。"
+    )
+    return {
+        "decision_type": "supply_chain_heatmap_alert",
+        "model_name": "supply-chain-risk-map",
+        "ai_output": {
+            "recommendation": recommendation,
+            "reasoning": reasoning,
+            "risk_level": "high",
+            "evidence_ids": [f"risk-map:{hashlib.sha256(region_name.encode('utf-8')).hexdigest()[:16]}"],
+            "limitations": "此預警依地區／供應據點風險彙整，仍須人工確認特定供應商、採購單與庫存影響。",
+        },
+        "evidence_snapshot": {
+            "risk_score": score,
+            "data_as_of": captured_at,
+            "sources": [{"name": "供應鏈風險地圖", "as_of": captured_at}],
+            "affected_entity": region_name,
+        },
+    }
+
+
 def validate_ai_output(output: Mapping[str, Any]) -> dict[str, Any]:
     """Accept only the small, reviewable AI recommendation contract."""
     if not isinstance(output, Mapping):
