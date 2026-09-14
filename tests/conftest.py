@@ -20,3 +20,10 @@ _TMP_DIR = tempfile.mkdtemp(prefix="erp_test_")
 os.environ["ERP_DB_PATH"] = os.path.join(_TMP_DIR, "test_erp.db")
 # 測試套件明確啟用合成資料；正式執行的安全預設維持關閉。
 os.environ["ERP_DEMO_MODE"] = "1"
+os.environ["ERP_ENABLE_DEMO_SEED"] = "0"
+
+# Tests must not access paid providers or external notification endpoints.
+os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+os.environ["ERP_SCHEDULER_ENABLED"] = "0"
+from backend.isolated_runtime import block_external_network
+block_external_network()

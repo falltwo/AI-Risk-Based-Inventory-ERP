@@ -4,6 +4,11 @@ backend/scheduler.py
 """
 
 import os
+import json
+import sqlite3
+import logging
+from dataclasses import dataclass
+from datetime import datetime, timezone
 import threading
 import time
 from backend.access_control import RISK_WORKSPACE_WRITE, require_capability
@@ -35,29 +40,135 @@ def refresh_supply_chain_news_once(*, actor: str) -> dict:
         actor=actor,
     )
 
-def start_background_jobs():
-    global _scheduler_started
-    if _scheduler_started:
-        return True
-    actor = os.getenv("ERP_SCHEDULER_ACTOR", "").strip()
-    if not actor:
-        print("Background scheduler disabled: ERP_SCHEDULER_ACTOR is not configured.")
-        return False
-    _scheduler_started = True
+@dataclass(frozen=True)
+class SchedulerConfig:
+    actor: str
+    enabled: bool = False
+    interval_seconds: int = 86400
+    initial_delay_seconds: int = 10
+    max_attempts: int = 3
+    retry_seconds: int = 30
 
-    def run_jobs():
-        while True:
+    def __post_init__(self):
+        if self.interval_seconds < 1 or self.initial_delay_seconds < 0 or self.max_attempts < 1 or self.retry_seconds < 0:
+            raise ValueError("Invalid scheduler timing or retry configuration")
+
+    @classmethod
+    def from_env(cls):
+        return cls(actor=os.getenv("ERP_SCHEDULER_ACTOR", "").strip(),
+                   enabled=os.getenv("ERP_SCHEDULER_ENABLED", "0") == "1",
+                   interval_seconds=int(os.getenv("ERP_SCHEDULER_INTERVAL_SECONDS", "86400")),
+                   initial_delay_seconds=int(os.getenv("ERP_SCHEDULER_INITIAL_DELAY_SECONDS", "10")),
+                   max_attempts=int(os.getenv("ERP_SCHEDULER_MAX_ATTEMPTS", "3")),
+                   retry_seconds=int(os.getenv("ERP_SCHEDULER_RETRY_SECONDS", "30")))
+
+
+def run_scheduled_refresh(config=None, *, job_key=None, wait=None):
+    """Explicit one-shot entry, with cross-process locking and durable idempotency.
+
+    Same key + success => skip. Failures retry up to max_attempts per invocation;
+    an explicit rerun of a failed key is allowed. OS lock permits crash recovery.
+    """
+    from .database import DB_FILE
+    from .job_lock import exclusive_job_lock
+    config = config or SchedulerConfig.from_env()
+    require_capability(config.actor, RISK_WORKSPACE_WRITE)
+    job_key = job_key or f"news:{int(time.time()) // config.interval_seconds}"
+    wait = wait or time.sleep
+    with exclusive_job_lock(DB_FILE, "scheduler") as acquired:
+        if not acquired:
+            return {"status": "busy", "job_key": job_key}
+        with sqlite3.connect(DB_FILE) as conn:
+            row = conn.execute("SELECT status FROM scheduled_jobs WHERE job_key=?", (job_key,)).fetchone()
+            if row and row[0] == "succeeded":
+                return {"status": "skipped", "job_key": job_key}
+            conn.execute("INSERT OR IGNORE INTO scheduled_jobs(job_key,status) VALUES (?,'pending')", (job_key,))
+        for attempt in range(config.max_attempts):
+            with sqlite3.connect(DB_FILE) as conn:
+                conn.execute("UPDATE scheduled_jobs SET status='running',attempts=attempts+1,started_at=?,finished_at=NULL,error=NULL WHERE job_key=?", (_utcnow(), job_key))
+            result = None
             try:
-                # 每天定時抓取一次新聞 (每 24 小時)
-                time.sleep(10) # 系統啟動後延遲 10 秒再抓
-                refresh_supply_chain_news_once(actor=actor)
-            except Exception as e:
-                print(f"Background scheduler error: {e}")
-            
-            # 休息 24 小時 (可以視需求調整頻率)
-            time.sleep(24 * 60 * 60)
+                result = refresh_supply_chain_news_once(actor=config.actor)
+                if result.get("status") in {"busy", "partial_failure", "pending_analysis"}:
+                    raise RuntimeError(result["status"])
+            except Exception as exc:
+                error = type(exc).__name__  # Do not persist credentials/provider payloads.
+                with sqlite3.connect(DB_FILE) as conn:
+                    conn.execute("UPDATE scheduled_jobs SET status='failed',finished_at=?,error=?,result_json=? WHERE job_key=?", (_utcnow(), error, json.dumps(result, ensure_ascii=False), job_key))
+                if isinstance(exc, PermissionError) or attempt + 1 >= config.max_attempts:
+                    return {"status": "failed", "job_key": job_key, "error": error}
+                if wait(config.retry_seconds):
+                    return {"status": "cancelled", "job_key": job_key}
+            else:
+                with sqlite3.connect(DB_FILE) as conn:
+                    conn.execute("UPDATE scheduled_jobs SET status='succeeded',finished_at=?,error=NULL,result_json=? WHERE job_key=?", (_utcnow(), json.dumps(result, ensure_ascii=False), job_key))
+                return {"status": "succeeded", "job_key": job_key, "result": result}
 
-    # 設定為 Daemon Thread，讓主程式結束時能隨之關閉
-    job_thread = threading.Thread(target=run_jobs, daemon=True)
-    job_thread.start()
-    return True
+
+def _utcnow():
+    return datetime.now(timezone.utc).isoformat()
+
+
+_start_lock = threading.Lock()
+_stop_event = threading.Event()
+_job_thread = None
+
+
+def start_background_jobs():
+    global _scheduler_started, _job_thread
+    config = SchedulerConfig.from_env()
+    if not config.enabled or not config.actor or os.getenv("ERP_ISOLATED_TEST") == "1":
+        return False
+    require_capability(config.actor, RISK_WORKSPACE_WRITE)
+    with _start_lock:
+        if _scheduler_started:
+            return True
+        _stop_event.clear()
+
+        def run_jobs():
+            global _scheduler_started
+            try:
+                if _stop_event.wait(config.initial_delay_seconds):
+                    return
+                while not _stop_event.is_set():
+                    try:
+                        run_scheduled_refresh(config, wait=_stop_event.wait)
+                    except Exception:
+                        logging.exception("Scheduled news refresh failed")
+                    if _stop_event.wait(config.interval_seconds):
+                        return
+            finally:
+                _scheduler_started = False
+
+        _job_thread = threading.Thread(target=run_jobs, name="erp-news-scheduler", daemon=True)
+        _scheduler_started = True
+        _job_thread.start()
+        return True
+
+
+def stop_background_jobs():
+    _stop_event.set()
+    if _job_thread:
+        _job_thread.join(timeout=5)
+
+
+def main():
+    import argparse
+    from .database import init_db
+    parser = argparse.ArgumentParser(description="Explicit supply-chain news refresh")
+    parser.add_argument("--once", action="store_true", required=True)
+    parser.add_argument("--job-key", help="Stable idempotency key; defaults to UTC interval bucket")
+    args = parser.parse_args()
+    if not os.getenv("ERP_DB_PATH"):
+        parser.error("Explicit ERP_DB_PATH is required")
+    if os.getenv("ERP_ISOLATED_TEST") == "1":
+        from .isolated_runtime import block_external_network
+        block_external_network()
+    init_db()
+    result = run_scheduled_refresh(job_key=args.job_key)
+    print(json.dumps(result, ensure_ascii=False))
+    return 1 if result["status"] in {"failed", "busy", "cancelled"} else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -41,75 +41,12 @@ _COUNTRY_DEFAULT_COORDS = {
     "新加坡": (1.3521, 103.8198),
 }
 
-# 區域與國家映射表：當事件標記為「中東」時，自動影響該區域內的所有國家。
-_REGION_COUNTRY_MAP = {
-    "中東": ["伊朗", "沙烏地阿拉伯", "阿聯酋", "以色列", "卡達", "伊拉克", "科威特", "約旦", "黎巴嫩", "敘利亞"],
-    "東亞": ["台灣", "日本", "中國", "南韓", "北韓", "香港", "澳門"],
-    "東南亞": ["越南", "泰國", "新加坡", "菲律賓", "馬來西亞", "印尼", "緬甸"],
-    "北美": ["美國", "加拿大", "墨西哥"],
-    "非洲": ["埃及", "南非", "摩洛哥", "奈及利亞"]
-}
-
-def _get_expanded_region_where(region, country_val, prefix=""):
-    """
-    擴展區域篩選邏輯：支援逗號分隔的多個國家/地區。
-    若輸入包含大區域名稱（如「中東」），則自動擴展為該區域下所有國家的 OR 條件。
-    【修正】當 country 與 region 同時指定且皆為單一值時，使用 AND 精確比對，
-    避免台灣北區事件誤擴展至台灣中區/南區。
-    """
-    # 精確節點比對：若 country 與 region 皆提供且為單一值，直接回傳 AND 查詢
-    c_single = (country_val or "").strip() if country_val and "," not in str(country_val) and "，" not in str(country_val) else ""
-    r_single = (region or "").strip() if region and "," not in str(region) and "，" not in str(region) else ""
-    # 若 region 以 country 為前綴（如 "台灣 北區"），去掉前綴只保留地區部分（"北區"）
-    if c_single and r_single and r_single.startswith(c_single):
-        r_single = r_single[len(c_single):].strip()
-    # 只有當 region 確實指向子地區（不為空、且不等於 country）才使用 AND 精確查詢
-    if c_single and r_single and r_single != c_single and c_single not in _REGION_COUNTRY_MAP:
-        # 使用精確 AND 比對確保只選該特定節點
-        return [f"({prefix}country LIKE ? AND {prefix}region LIKE ?)"], [f"%{c_single}%", f"%{r_single}%"]
-    
-    where_sub = []
-    params_sub = []
-    
-    # 解析輸入：支援「美國, 伊朗」或「北美, 中東」或「台灣 北區」
-    input_names = []
-    if region:
-        # 將全型逗號轉半型，且將空格也視為分隔符（若非大區域關鍵字）
-        raw_names = str(region).replace("，", ",").split(",")
-        for r in raw_names:
-            if r.strip():
-                # 特殊處理：如果有空格且不是已定義的大區域，則拆分
-                if " " in r.strip() and r.strip() not in _REGION_COUNTRY_MAP:
-                    input_names.extend([p.strip() for p in r.strip().split() if p.strip()])
-                else:
-                    input_names.append(r.strip())
-                    
-    if country_val:
-        input_names.extend([n.strip() for n in str(country_val).replace("，", ",").split(",") if n.strip()])
-    
-    if not input_names:
-        return [], []
-
-    # 展開大區域並收集所有目標關鍵字
-    target_set = set()
-    for name in input_names:
-        target_set.add(name)
-        # 檢查是否為大區域
-        if name in _REGION_COUNTRY_MAP:
-            for c in _REGION_COUNTRY_MAP[name]:
-                target_set.add(c)
-                
-    # 產生內容包含其中任一關鍵字的 OR 條件 (LIKE 查詢)
-    conditions = []
-    for c in sorted(list(target_set)):
-        conditions.append(f"{prefix}country LIKE ?")
-        conditions.append(f"{prefix}region LIKE ?")
-        params_sub.extend([f"%{c}%", f"%{c}%"])
-    
-    if conditions:
-        where_sub.append(f"({' OR '.join(conditions)})")
-            
-    return where_sub, params_sub
+from .region_matching import (
+    REGION_COUNTRY_MAP, matches_location, split_location, connect_db, normalize,
+    expanded_region_where as _get_expanded_region_where,
+)
+from .risk_validation import number, text, json_payload, failed_analysis, parse_news_batch, EVENT_TYPES
+from .risk_intelligence import save_ai_risk_summary, get_latest_ai_risk_summary, build_risk_evidence, gate_by_evidence
 
 
 def _fill_coords_from_country(df, country_col="country", lat_col="latitude", lon_col="longitude"):
@@ -123,7 +60,7 @@ def _fill_coords_from_country(df, country_col="country", lat_col="latitude", lon
         df[lon_col] = pd.NA
     for idx, row in df.iterrows():
         if pd.isna(row.get(lat_col)) or pd.isna(row.get(lon_col)):
-            country = (row.get(country_col) or "").strip()
+            country = normalize(row.get(country_col))
             if country and country in _COUNTRY_DEFAULT_COORDS:
                 lat, lon = _COUNTRY_DEFAULT_COORDS[country]
                 df.at[idx, lat_col], df.at[idx, lon_col] = lat, lon
@@ -132,7 +69,7 @@ def _fill_coords_from_country(df, country_col="country", lat_col="latitude", lon
 
 def get_suppliers_for_map():
     """取得正式供應商清單（含經緯度、國家、地區、風險等級），供地圖與清單使用。經緯度僅後端使用。"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     df = __pd_read("SELECT supplier_id, name, country, region, latitude, longitude, risk_level FROM suppliers WHERE is_official=1", conn)
     conn.close()
     return _fill_coords_from_country(df)
@@ -140,7 +77,7 @@ def get_suppliers_for_map():
 
 def get_customers_for_map():
     """取得客戶清單（含經緯度、國家、地區、風險等級），供地圖與清單使用。經緯度僅後端使用。"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     try:
         df = __pd_read("SELECT customer_id, name, country, region, latitude, longitude, risk_level FROM customers", conn)
     except Exception:
@@ -149,11 +86,16 @@ def get_customers_for_map():
     return _fill_coords_from_country(df)
 
 
+from .risk_contract import valid_event_sql
+
+_VALID_EVENT_SOURCE = valid_event_sql()
+
+
 def get_recent_events_for_delay(limit=50):
     """取得近期供應鏈事件，供地圖判定出貨延遲狀況。"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     df = __pd_read(
-        "SELECT event_type, region, country, impact_days FROM supply_chain_events ORDER BY id DESC LIMIT ?",
+        f"SELECT event_type, region, country, impact_days, created_at, news_id FROM supply_chain_events WHERE {_VALID_EVENT_SOURCE} ORDER BY COALESCE(created_at, '') DESC, id DESC LIMIT ?",
         conn,
         params=(limit,),
     )
@@ -161,11 +103,91 @@ def get_recent_events_for_delay(limit=50):
     return df
 
 
+# ── 熱圖事件加權 ──────────────────────────────────────────────────────
+# 原本「只要有任何事件就 +40」會讓每個有事件的據點都停在 60%，看不出差異。
+# 改為：依「最嚴重事件的延遲天數」給分，多筆事件再加成，逾期事件減半。
+HEATMAP_BASE_RISK = 20.0
+HEATMAP_EVENT_POINTS = ((30, 50), (14, 40), (7, 30), (1, 20), (0, 10))  # (延遲天數下限, 加權)
+HEATMAP_EXTRA_EVENT_BONUS = 5      # 每多一筆事件
+HEATMAP_EXTRA_EVENT_CAP = 15
+HEATMAP_EVENT_STALE_DAYS = 30      # 登錄超過此天數的事件加權減半
+HEATMAP_EVENT_LOOKBACK = 200       # 參與計算的事件筆數上限（依登錄時間新→舊）
+
+
+def _event_points(impact_days) -> float:
+    try:
+        days = max(0, int(impact_days or 0))
+    except (TypeError, ValueError):
+        days = 0
+    for floor, points in HEATMAP_EVENT_POINTS:
+        if days >= floor:
+            return float(points)
+    return 0.0
+
+
+def _clean_text(value) -> str:
+    """DataFrame 的 NaN／None 一律視為空字串（str(nan) 會變成 "nan" 而誤判為有值）。"""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    return "" if text.casefold() in {"nan", "none"} else text
+
+
+def _event_matches_location(ev, country, region):
+    return matches_location(country, region, _clean_text(ev.get("region")), _clean_text(ev.get("country")))
+
+
+def score_region_events(country: str, region: str, events, *, now=None) -> dict:
+    """算出單一據點的事件加權與可讀理由。
+
+    回傳 {"points", "count", "max_days", "reason"}；events 可為 DataFrame 或 list[dict]。
+    """
+    if events is None:
+        rows = []
+    elif hasattr(events, "iterrows"):
+        rows = [r.to_dict() for _, r in events.iterrows()]
+    else:
+        rows = list(events)
+    matched = [ev for ev in rows if _event_matches_location(ev, country or "", region or "")]
+    if not matched:
+        return {"points": 0.0, "count": 0, "max_days": 0, "reason": "近期無登錄事件"}
+
+    reference = now or datetime.now()
+    best = 0.0
+    max_days = 0
+    stale = 0
+    for ev in matched:
+        points = _event_points(ev.get("impact_days"))
+        try:
+            max_days = max(max_days, int(ev.get("impact_days") or 0))
+        except (TypeError, ValueError):
+            pass
+        created = str(ev.get("created_at") or "")[:10]
+        try:
+            age = (reference - datetime.strptime(created, "%Y-%m-%d")).days
+        except ValueError:
+            age = 0
+        if age > HEATMAP_EVENT_STALE_DAYS:
+            points *= 0.5
+            stale += 1
+        best = max(best, points)
+    bonus = min(HEATMAP_EXTRA_EVENT_CAP, HEATMAP_EXTRA_EVENT_BONUS * (len(matched) - 1))
+    reason = f"{len(matched)} 則事件・最長延遲 {max_days} 天"
+    if stale:
+        reason += f"（{stale} 則已逾 {HEATMAP_EVENT_STALE_DAYS} 天）"
+    return {"points": best + bonus, "count": len(matched), "max_days": max_days, "reason": reason}
+
+
 def get_region_procurement_share():
     """依地區彙總採購金額，計算各地區採購佔比（該地區供應商之採購額 / 全公司採購額）。
     回傳 list of dict: region_key, display_name, procurement_ratio (0~1), total_amount, supplier_count。
     用於初始熱圖：採購佔比愈高，集中度風險愈高，可對應風險低/中/高。"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     total = __pd_read(
         "SELECT COALESCE(SUM(total_amount), 0) as tot FROM purchase_orders WHERE total_amount IS NOT NULL AND total_amount > 0",
         conn,
@@ -218,15 +240,6 @@ def get_region_procurement_share():
 #
 # 【廣域地區對應】當 AI 建議的更新地區為廣域名稱（如「亞洲」）時，
 #   apply_heatmap_updates 需將其對應到該區所有國家之熱點一併更新。
-REGION_COUNTRY_MAP = {
-    "亞洲": ["台灣", "日本", "中國", "南韓", "北韓", "越南", "泰國", "新加坡", "馬來西亞", "印尼", "菲律賓", "印度", "香港", "澳門"],
-    "東亞": ["台灣", "日本", "中國", "南韓", "北韓", "香港", "澳門"],
-    "東南亞": ["越南", "泰國", "新加坡", "馬來西亞", "印尼", "菲律賓", "緬甸", "柬埔寨", "寮國"],
-    "歐洲": ["德國", "法國", "英國", "義大利", "西班牙", "荷蘭", "波蘭", "比利時", "奧地利", "瑞士"],
-    "北美": ["美國", "加拿大", "墨西哥"],
-    "中東": ["以色列", "沙烏地阿拉伯", "阿拉伯聯合大公國", "伊朗", "伊拉克", "土耳其", "約旦", "黎巴嫩"],
-}
-
 def get_risk_heatmap_data():
     """
     取得熱圖資料：永遠以「供應商據點」為基礎產出完整熱點清單，再以 risk_heatmap 表覆寫風險%與摘要。
@@ -236,10 +249,9 @@ def get_risk_heatmap_data():
     suppliers = get_suppliers_for_map()
     if suppliers is None or suppliers.empty:
         return []
-    events = get_recent_events_for_delay(20)
+    events = get_recent_events_for_delay(HEATMAP_EVENT_LOOKBACK)
     region_scores = get_region_risk_scores()
     procurement_by_region = get_region_procurement_share()
-    default_risk = 20.0
     seen = set()
     default_rows = []
     for _, s in suppliers.iterrows():
@@ -249,24 +261,25 @@ def get_risk_heatmap_data():
         if key in seen:
             continue
         seen.add(key)
-        risk = default_risk
-        if events is not None and not events.empty:
-            for _, ev in events.iterrows():
-                if (ev.get("country") and ev["country"] in country) or (ev.get("region") and ev["region"] in region):
-                    risk = min(100, risk + 40)
-                    break
+        event_score = score_region_events(country, region, events)
+        risk = min(100.0, HEATMAP_BASE_RISK + event_score["points"])
+        reasons = [event_score["reason"]]
         for k, v in region_scores.items():
-            if k in region or k in country:
+            if matches_location(country, region, k):
+                if v > risk:
+                    reasons.append(f"地區係數 {k} {v:.0f}%")
                 risk = max(risk, min(100, v))
-                break
         if key in procurement_by_region:
             ratio = procurement_by_region[key]["procurement_ratio"]
             if ratio >= 0.35:
-                risk = max(risk, 70)
+                floor = 70
             elif ratio >= 0.15:
-                risk = max(risk, 45)
+                floor = 45
             else:
-                risk = max(risk, min(35, 20 + ratio * 100))
+                floor = min(35, 20 + ratio * 100)
+            if floor > risk:
+                reasons.append(f"採購集中度 {ratio:.0%}")
+            risk = max(risk, floor)
         lat, lon = s.get("latitude"), s.get("longitude")
         if lat is None or lon is None:
             continue
@@ -276,13 +289,17 @@ def get_risk_heatmap_data():
             "latitude": float(lat),
             "longitude": float(lon),
             "risk_pct": round(risk, 1),
+            "risk_reason": "；".join(reasons),
+            "event_count": event_score["count"],
+            "event_max_days": event_score["max_days"],
             "ai_summary": None,
             "updated_at": None,
+            "estimated_delay": None,
         })
     # 2. 讀取 DB 中手動/AI 覆寫的風險%與摘要，依 region_key 覆蓋到預設清單
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     df = __pd_read(
-        "SELECT region_key, display_name, latitude, longitude, risk_pct, ai_summary, updated_at FROM risk_heatmap",
+        "SELECT region_key, display_name, latitude, longitude, risk_pct, ai_summary, updated_at, estimated_delay FROM risk_heatmap",
         conn,
     )
     conn.close()
@@ -295,6 +312,7 @@ def get_risk_heatmap_data():
                     "risk_pct": r.get("risk_pct"),
                     "ai_summary": r.get("ai_summary"),
                     "updated_at": r.get("updated_at"),
+                    "estimated_delay": None if pd.isna(r.get("estimated_delay")) else r.get("estimated_delay"),
                     "latitude": r.get("latitude"),
                     "longitude": r.get("longitude"),
                 }
@@ -304,14 +322,20 @@ def get_risk_heatmap_data():
         rk = row["region_key"]
         if rk in overrides:
             o = overrides[rk]
+            overridden = o.get("risk_pct") is not None
             out.append({
                 "region_key": rk,
                 "display_name": row["display_name"],
                 "latitude": o.get("latitude") if o.get("latitude") is not None else row["latitude"],
                 "longitude": o.get("longitude") if o.get("longitude") is not None else row["longitude"],
-                "risk_pct": o.get("risk_pct") if o.get("risk_pct") is not None else row["risk_pct"],
+                "risk_pct": o.get("risk_pct") if overridden else row["risk_pct"],
+                "risk_reason": (f"AI／人工設定（{o.get('updated_at') or '時間未記錄'}）" if overridden
+                                else row["risk_reason"]),
+                "event_count": row["event_count"],
+                "event_max_days": row["event_max_days"],
                 "ai_summary": o.get("ai_summary"),
                 "updated_at": o.get("updated_at"),
+                "estimated_delay": o.get("estimated_delay"),
             })
         else:
             out.append(row)
@@ -323,8 +347,9 @@ def upsert_risk_heatmap(
 ):
     """新增或更新一筆熱圖熱點。"""
     require_capability(actor, RISK_WORKSPACE_WRITE)
+    risk_pct = number(risk_pct, maximum=100)
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     conn.execute(
         """INSERT INTO risk_heatmap (region_key, display_name, latitude, longitude, risk_pct, ai_summary, updated_at)
            VALUES (?,?,?,?,?,?,?) ON CONFLICT(region_key) DO UPDATE SET
@@ -339,7 +364,7 @@ def upsert_risk_heatmap(
 def reset_risk_heatmap_to_initial(*, actor=None):
     """清空 risk_heatmap 表，使熱圖還原為依供應商據點與風險事件計算的初始狀態。"""
     require_capability(actor, RISK_WORKSPACE_WRITE)
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     conn.execute("DELETE FROM risk_heatmap")
     conn.commit()
     conn.close()
@@ -350,84 +375,139 @@ def reset_risk_heatmap_to_initial(*, actor=None):
 
 
 def _gate_heatmap_updates(raw_updates, valid_list, name_expansions) -> list[dict]:
-    """
-    issue #47 P1-3：合法區域檢核由 code 執行（取代 prompt 的嚴詞要求）。
-      - 名稱在合法清單 → 直接收
-      - 名稱是可展開的總稱（如「台灣」「中東」）→ 展開為完整節點
-      - 其餘 → 丟棄
-    無合法清單（DB 無正式供應商）時退回寬鬆模式：全收。
-    """
-    gate_on = bool(valid_list) and not (len(valid_list) == 1 and valid_list[0].startswith("（"))
+    """Only validated numeric suggestions matching an actual node are actionable."""
+    if not isinstance(raw_updates, list):
+        return []
     out = []
-    for u in raw_updates or []:
-        u = u or {}
-        name = str(u.get("地區") or u.get("display_name") or "").strip()
-        pct = u.get("風險", u.get("risk_pct"))
+    for u in raw_updates:
         try:
-            pct = float(str(pct).replace("%", "").strip())
-        except (TypeError, ValueError):
+            name = text(u.get("地區", u.get("display_name")))
+            pct = number(u.get("風險", u.get("risk_pct")), maximum=100)
+        except (AttributeError, TypeError, ValueError):
             continue
-        if not name:
-            continue
-        if not gate_on or name in valid_list:
-            out.append({"display_name": name, "risk_pct": pct})
-        elif name in name_expansions:
-            for expanded in name_expansions[name]:
-                out.append({"display_name": expanded, "risk_pct": pct})
-        # 不在清單也不可展開 → 丟棄（code-side gate）
+        for node in valid_list:
+            c, r = split_location(node)
+            if node == name or node in name_expansions.get(name, []) or matches_location(c or node, r, name):
+                out.append({"display_name": node, "risk_pct": pct})
     return out
 
 
 def _coerce_heatmap_events(raw_events) -> list[dict]:
-    """AI 回傳事件 → 內部契約（型別修正 + 預設值）。維持舊行為：事件不做地區硬閘。"""
+    """Reject malformed events; null delay remains unknown and 0 stays zero."""
+    if not isinstance(raw_events, list):
+        return []
     out = []
-    for e in raw_events or []:
-        e = e or {}
+    for e in raw_events:
         try:
-            days = int(e.get("延遲天數", e.get("impact_days", 14)) or 14)
-        except (TypeError, ValueError):
-            days = 14
-        out.append({
-            "event_type": str(e.get("類型") or e.get("event_type") or "其他").strip() or "其他",
-            "region": str(e.get("地區") or e.get("region") or "").strip(),
-            "country": str(e.get("國家") or e.get("country") or "").strip(),
-            "impact_days": days,
-            "description": str(e.get("描述") or e.get("description") or "").strip(),
-        })
+            etype = text(e.get("類型", e.get("event_type")))
+            if etype not in EVENT_TYPES:
+                raise ValueError("Invalid event type")
+            region = text(e.get("地區", e.get("region", "")))
+            country = text(e.get("國家", e.get("country", "")))
+            if not (region or country):
+                raise ValueError("Missing geography")
+            if "延遲天數" not in e and "impact_days" not in e:
+                raise ValueError("Missing delay")
+            days = number(e.get("延遲天數", e.get("impact_days")), maximum=365, integer=True, nullable=True)
+            out.append(dict(event_type=etype, region=region, country=country,
+                            impact_days=days, description=text(e.get("描述", e.get("description", "")))))
+        except (AttributeError, TypeError, ValueError):
+            continue
     return out
 
 
-def get_heatmap_ai_summary(api_key: str = "", news_context: str = "", reference_date: str = "2026-04-11", model: str | None = None) -> tuple[str, list[dict], list[dict]]:
+# ── AI 風險摘要：證據閘門 + 持久化 ───────────────────────────────────
+# 摘要原本只活在 session_state：重新整理就消失、L1 看不到、排程產生的建議事件直接丟掉。
+# 現在每次產生都寫進 risk_ai_summaries，L2 重開頁面與 L1 總覽都讀最新一筆。
+
+AI_SUMMARY_TABLE = "risk_ai_summaries"
+EVIDENCE_DAYS_MULTIPLIER = 2     # AI 建議延遲天數上限 = 證據最長天數 × 此倍率
+EVIDENCE_DAYS_FLOOR = 7          # …但至少允許到這個天數（證據只有 1-2 天時仍可合理外推）
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def _summary_news_context(news_items):
+    from .risk_contract import analyzed_news
+    rows = [analyzed_news(n) for n in news_items or []]
+    return "\n".join(f"{n.get('title') or ''} {n['summary']} [{n['country']} {n['region']}; 預估延遲: {n['estimated_delay'] if n['estimated_delay'] is not None else '未知'}天]" for n in rows if n is not None)
+
+
+def analyze_heatmap_risk(
+    news_items=None, *, news_context: str = "", reference_date: str | None = None,
+    actor=None, persist: bool = True,
+) -> dict:
+    """AI 熱圖摘要（結構化）。
+
+    - news_items：新聞列（含 country/region/category/estimated_delay）→ 同時當 prompt 素材與證據
+    - news_context：舊介面的純文字素材（沒有 news_items 時使用；證據只剩已登錄事件）
+    - actor 有給且 persist=True 時把結果寫進 risk_ai_summaries（需 RISK_WORKSPACE_WRITE）
+    回傳 dict：summary / updates / events / audit / evidence_locations / generated_at /
+              reference_date / news_count / event_count / summary_id / error
     """
-    獲取 AI 熱圖摘要，並整合現有的正式事件，確保「情報 -> 摘要 -> 應變」流程連貫。
-    """
+    import json
+    from backend.llm_client import complete_text
+
+    from .risk_contract import analyzed_news
+    news_items = [n for n in (news_items or []) if analyzed_news(n) is not None]
+    reference_date = reference_date or datetime.now().strftime("%Y-%m-%d")
     events_df = get_active_risk_events()
     events_text = "目前尚無已登錄事件。"
     if events_df is not None and not events_df.empty:
         # 只列出最近的 15 筆事件作為背景
+        # region 為 NaN 時 pandas 值為 truthy，原本會把字面 "nan" 餵給模型（模型真的回了「地區欄位為 nan」）
         events_text = "\n".join([
-            f"- 【{row['event_type']}】區域：{row['region'] or row['country']} (預計延遲：{row['impact_days']}天)"
+            f"- 【{_clean_text(row['event_type']) or '其他'}】區域："
+            f"{' '.join(p for p in (_clean_text(row['country']), _clean_text(row['region'])) if p) or '未填'}"
+            f" (預計延遲：{row['impact_days']}天)"
             for _, row in events_df.head(15).iterrows()
         ])
 
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     try:
         # 僅選取正式供應商 (is_official=1) 的據點，確保建議清單精確對齊
         valid_regions_df = pd.read_sql_query("SELECT DISTINCT country, region FROM suppliers WHERE is_official=1 AND country IS NOT NULL", conn)
         valid_regions = []
+        valid_locations = []
         for _, r in valid_regions_df.iterrows():
-            c = str(r['country']).strip()
-            rg = str(r['region']).strip()
+            c = _clean_text(r['country'])
+            rg = _clean_text(r['region'])
+            valid_locations.append((c, rg))
             if rg and rg != c:
                 valid_regions.append(f"{c} {rg}")
             else:
                 valid_regions.append(c)
         valid_regions_text = "、".join(set(valid_regions)) or "（目前無正式供應商據點資料，請跳過風險建議清單）"
     except Exception:
+        valid_locations = []
         valid_regions_text = "（系統讀取區域資料失敗，請跳過風險建議清單）"
     finally:
         conn.close()
 
+    if news_items:
+        news_context = _summary_news_context(news_items)
     prompt = HEATMAP_AI_SUMMARY_PROMPT_V2.format(
         reference_date=reference_date,
         events_text=events_text,
@@ -436,111 +516,116 @@ def get_heatmap_ai_summary(api_key: str = "", news_context: str = "", reference_
     )
     # 合法區域清單與展開表（code-side gate 用；如「台灣」→「台灣 北區/中區/南區」）
     valid_list = [v.strip() for v in (valid_regions_text or "").split("、") if v.strip()]
-    name_expansions: dict = {}
-    for v in valid_list:
-        parts = v.split(" ")
-        c = parts[0]
-        name_expansions.setdefault(c, [])
-        if v not in name_expansions[c]:
-            name_expansions[c].append(v)
-        if len(parts) > 1:
-            r = parts[1]
-            name_expansions.setdefault(r, [])
-            if v not in name_expansions[r]:
-                name_expansions[r].append(v)
+    name_expansions = {}
+    for country, region in valid_locations:
+        name = f"{country} {region}" if region and region != country else country
+        name_expansions.setdefault(country, []).append(name)
 
+    evidence = build_risk_evidence(news_items, events_df)
+    result = {
+        "summary": "",
+        "updates": [],
+        "events": [],
+        "audit": [],
+        "evidence_locations": sorted(evidence["locations"]),
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "reference_date": reference_date,
+        "news_count": len(news_items or []),
+        "event_count": 0 if events_df is None else int(len(events_df)),
+        "summary_id": None,
+        "error": False, "analysis_status": "succeeded", "analysis_error": None,
+        "sources": evidence["sources"], "actor": actor,
+    }
     try:
         # issue #27/#47：統一 LLM 入口 + 結構化輸出（JSON）。
-        # 合法區域檢核由 _gate_heatmap_updates 執行，prompt 只做平述引導；
-        # 原本的 UPDATE:/EVENT: 行解析與正文回填 regex 全數移除。
-        import json
-        from backend.llm_client import complete_text
+        # 合法區域檢核由 _gate_heatmap_updates 執行、證據檢核由 gate_by_evidence 執行，
+        # prompt 只做平述引導。
         raw = (complete_text(prompt, temperature=0.3, json_mode=True,
                              tag="analysis:heatmap") or "").strip()
         if not raw:
-            return "AI 摘要失敗：模型未回傳內容。", [], []
-        payload = json.loads(re.sub(r"```json\s*|```\s*", "", raw))
+            result.update(analysis_status="failed", analysis_error="empty_response", summary="AI 摘要失敗：模型未回傳內容。", error=True)
+            return result
+        payload = json_payload(raw)
+        if not isinstance(payload, dict) or not isinstance(payload.get("摘要"), str) or not isinstance(payload.get("更新"), list) or not isinstance(payload.get("事件"), list):
+            raise ValueError("Invalid heatmap response schema")
 
-        summary = str(payload.get("摘要") or "").strip() or "（AI 未提供摘要內容）"
+        for update in payload["更新"]:
+            if not isinstance(update, dict) or not text(update.get("地區")):
+                raise ValueError("Invalid heatmap update")
+            number(update.get("風險"), maximum=100)
+        if len(_coerce_heatmap_events(payload["事件"])) != len(payload["事件"]):
+            raise ValueError("Invalid heatmap event")
+        summary = text(payload["摘要"])
+        if not summary:
+            raise ValueError("Missing summary")
         updates = _gate_heatmap_updates(payload.get("更新"), valid_list, name_expansions)
-        suggested_events = _coerce_heatmap_events(payload.get("事件"))
-        return summary, updates, suggested_events
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return f"AI 摘要解析失敗：{e}", [], []
+        suggested_events = [e for e in _coerce_heatmap_events(payload.get("事件"))
+                            if any(matches_location(c, r, e["region"], e["country"]) for c,r in valid_locations)]
+        updates, suggested_events, audit = gate_by_evidence(updates, suggested_events, evidence)
+        result["raw_summary"] = summary
+        if audit:
+            summary = "證據檢核後的風險摘要：\n" + "\n".join([f"- {u['display_name']}: {u['risk_pct']}%" for u in updates] + [f"- {e['country']} {e['region']}: {e['event_type']}，{e['impact_days']} 天" for e in suggested_events])
+            if not updates and not suggested_events:
+                summary += "沒有可套用的有效建議。"
+        result.update({"summary": summary, "updates": updates, "events": suggested_events, "audit": audit,
+                       # 模型可能想 1～2 分鐘，「產生時間」以回覆完成為準
+                       "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+    except Exception:
+        result.update(summary="AI 摘要解析失敗：請稍後重試。", error=True, analysis_status="failed", analysis_error="invalid_output_or_provider_error", updates=[], events=[])
+        return result
+
+    if persist and actor:
+        result["summary_id"] = save_ai_risk_summary(result, actor=actor)
+    return result
 
 
-def apply_heatmap_updates(updates, ai_summary=None, *, actor=None):
-    """
-    將 AI 回傳的 UPDATE 清單套用到熱圖。
-    - 若 update 的 display_name 為廣域地區（如「亞洲」），則將該地區內所有熱點都更新為對應 risk_pct。
-    - 否則依「display_name 包含於熱點 display_name」匹配單一熱點後更新。
-    """
-    require_capability(actor, RISK_WORKSPACE_WRITE)
-    if not updates:
-        return 0
-    heatmap_rows = get_risk_heatmap_data()
-    if not heatmap_rows:
-        return
-    summary_snippet = (ai_summary or "")[:500]
+def resolve_heatmap_updates(updates, heatmap_rows):
+    """Resolve once for both UI preview and persistence; last matching update wins."""
+    resolved = {}
     for u in updates:
-        name = (u.get("display_name") or "").strip()
-        risk_pct = u.get("risk_pct")
-    # 建立別名映射以提升匹配率
-    synonyms = {"韓國": "南韓", "南韓": "韓國", "美國": "美洲", "德國": "德國"}
-    
-    matched_count = 0
-    for u in updates:
-        name = (u.get("display_name") or "").strip()
-        risk_pct = u.get("risk_pct")
-        if not name or risk_pct is None:
-            continue
-        
-        target_names = [name]
-        if name in synonyms:
-            target_names.append(synonyms[name])
-            
-        # 1. 廣域地區匹配
-        is_region_match = False
-        for t_name in target_names:
-            if t_name in REGION_COUNTRY_MAP:
-                countries = REGION_COUNTRY_MAP[t_name]
-                for r in heatmap_rows:
-                    country = (r.get("region_key") or "").split("|")[0].strip()
-                    if country in countries:
-                        upsert_risk_heatmap(
-                            r["region_key"], r["display_name"], r["latitude"], r["longitude"],
-                            float(risk_pct), summary_snippet, actor=actor,
-                        )
-                        matched_count += 1
-                is_region_match = True
+        pct = number(u.get("risk_pct"), maximum=100)
+        name = text(u.get("display_name"))
+        for row in heatmap_rows:
+            c, r = split_location(row["region_key"])
+            if matches_location(c, r, name):
+                value = dict(row, risk_pct=pct)
+                if "estimated_delay" in u:
+                    value["estimated_delay"] = number(u["estimated_delay"], maximum=365, integer=True, nullable=True)
+                resolved[row["region_key"]] = value
+    return list(resolved.values())
+
+
+def build_heatmap_review_rows(updates, events, heatmap_rows):
+    rows = []
+    for row in resolve_heatmap_updates(updates, heatmap_rows):
+        c, r = split_location(row["region_key"])
+        days = row.get("estimated_delay")
+        for event in events:
+            if matches_location(c, r, event.get("region"), event.get("country")):
+                days = event.get("impact_days")
                 break
-        
-        if is_region_match:
-            continue
-            
-        # 2. 國家/地區精準或模糊匹配
-        for r in heatmap_rows:
-            d_name = r.get("display_name") or ""
-            r_key = r.get("region_key") or ""
-            country_part = r_key.split("|")[0] if "|" in r_key else d_name
-            
-            matched = False
-            for t_name in target_names:
-                # 匹配邏輯：名稱包含、國家部包含、或熱點名稱包含
-                if t_name in d_name or t_name in country_part or d_name in t_name:
-                    matched = True
-                    break
-            
-            if matched:
-                upsert_risk_heatmap(
-                    r["region_key"], r["display_name"], r["latitude"], r["longitude"],
-                    float(risk_pct), summary_snippet, actor=actor,
-                )
-                matched_count += 1
-    return matched_count
+        rows.append({"套用": True, "地區": row["display_name"],
+                     "預估風險 (%)": row["risk_pct"], "預估延遲 (天)": days})
+    return rows
 
+
+def apply_heatmap_updates(updates, ai_summary=None, *, actor=None, summary_result=None):
+    """Atomically persist the exact reviewed risk AND delay per node."""
+    require_capability(actor, RISK_WORKSPACE_WRITE)
+    rows = resolve_heatmap_updates(updates or [], get_risk_heatmap_data())
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    with connect_db(DB_FILE) as conn:
+        for row in rows:
+            conn.execute("""INSERT INTO risk_heatmap
+                (region_key,display_name,latitude,longitude,risk_pct,ai_summary,updated_at,estimated_delay)
+                VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(region_key) DO UPDATE SET
+                risk_pct=excluded.risk_pct,ai_summary=excluded.ai_summary,
+                updated_at=excluded.updated_at,estimated_delay=excluded.estimated_delay""",
+                (row["region_key"],row["display_name"],row["latitude"],row["longitude"],
+                 row["risk_pct"],(ai_summary or "")[:500],now,row.get("estimated_delay")))
+        if summary_result is not None:
+            save_ai_risk_summary(summary_result, actor=actor, conn=conn)
+    return len(rows)
 
 
 def translate_to_chinese_traditional(api_key: str = "", text: str = "", model_name: str = "") -> str:
@@ -584,9 +669,43 @@ def generate_communication_draft(api_key: str = "", context: str = "", target_ty
 
 
 
+def get_region_exposure(region_key) -> dict:
+    """單一據點的曝險資訊：未結採購單金額／張數 + 該區供應商數。
+
+    「曝險金額」只算 status 不在 (已完成, 已取消) 的採購單；沒有採購單時金額為 0，
+    前端應改顯示供應商家數而不是誤導的 $0。
+    """
+    conn = connect_db(DB_FILE)
+    try:
+        country, region = split_location(region_key)
+        where_sub, params_sub = _get_expanded_region_where(region, country, prefix="s.")
+        supplier_where = " AND ".join(where_sub) or "1=1"
+        sup_row = conn.execute(
+            f"""SELECT COUNT(*), COALESCE(SUM(CASE WHEN s.is_official=1 THEN 1 ELSE 0 END), 0)
+                FROM suppliers s WHERE {supplier_where}""",
+            tuple(params_sub),
+        ).fetchone()
+        po_row = conn.execute(
+            f"""SELECT COUNT(p.po_id), COALESCE(SUM(p.total_amount), 0)
+                FROM purchase_orders p
+                JOIN suppliers s ON p.supplier_id = s.supplier_id
+                WHERE (p.status IS NULL OR p.status NOT IN ('已完成','已取消'))
+                  AND {supplier_where}""",
+            tuple(params_sub),
+        ).fetchone()
+    finally:
+        conn.close()
+    return {
+        "supplier_count": int(sup_row[0] or 0),
+        "official_supplier_count": int(sup_row[1] or 0),
+        "open_po_count": int(po_row[0] or 0),
+        "open_po_amount": float(po_row[1] or 0),
+    }
+
+
 def get_total_impact_amount(region_key):
     """計算特定地區受波及的採購總金額 (美元)。"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     where = ["(p.status IS NULL OR p.status NOT IN ('已完成','已取消'))"]
     params = []
     where_sub, params_sub = _get_expanded_region_where(region_key, None, prefix="s.")
@@ -607,7 +726,7 @@ def get_total_impact_amount(region_key):
 def infer_affected_region_from_news(api_key: str, news_text: str, model: str | None = None) -> dict:
     """單篇新聞分析（保留原介面）。"""
     res = batch_infer_affected_region_from_news(api_key, [news_text], model=model)
-    return res[0] if res else {"is_relevant": True, "country": "", "region": "", "event_type": "其他", "estimated_delay": 0, "chinese_summary": ""}
+    return res[0] if res else failed_analysis("missing_result")
 
 
 def batch_infer_affected_region_from_news(api_key: str = "", news_texts: List[str] = None, model: str | None = None) -> List[dict]:
@@ -641,59 +760,30 @@ def batch_infer_affected_region_from_news(api_key: str = "", news_texts: List[st
         # issue #27：統一 LLM 入口（json_mode + 低溫；供應商 fallback 在底層）
         from backend.llm_client import complete_text
         try:
-            raw_text = (complete_text(prompt, temperature=0.1, json_mode=True,
-                                      tag="analysis:news_batch") or "").strip()
-        except Exception as e:
-            print("批量新聞分析失敗，回傳預設 7 天延遲。錯誤:", e)
-            return [{"is_relevant": True, "country": "", "region": "", "event_type": "其他", "estimated_delay": 7, "chinese_summary": f"AI 分析失敗: {e}"}] * len(news_texts)
-        # 去除 markdown 程式碼區塊符號
-        clean_json = re.sub(r"```json\s*", "", raw_text)
-        clean_json = re.sub(r"```\s*", "", clean_json)
-        
-        payload = json.loads(clean_json)
-        # issue #47 P0-2：頂層改為物件 {"results": [...]}（json_object 模式規格要求）；
-        # 相容舊版頂層 array（模型偶爾仍會直接回 array）
-        data = payload.get("results", []) if isinstance(payload, dict) else payload
-        # 映射回原始順序
-        results = [{"is_relevant": True, "country": "", "region": "", "event_type": "其他", "estimated_delay": 0, "chinese_summary": ""}] * len(news_texts)
-        for item in data:
-            idx = item.get("news_id")
-            if idx is not None and 0 <= idx < len(results):
-                results[idx] = {
-                    "is_relevant": item.get("相關性") == "YES",
-                    "country": item.get("國家") if item.get("國家") != "不明" else "",
-                    "region": item.get("地區") if item.get("地區") != "不明" else "",
-                    "event_type": item.get("事件類型") or "其他",
-                    "chinese_summary": item.get("繁體中文簡要") or "",
-                    "estimated_delay": item.get("預計延遲") or 0
-                }
-        return results
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return [{"is_relevant": True, "country": "", "region": "", "event_type": "其他", "estimated_delay": 7, "chinese_summary": f"系統錯誤: {e}"}] * len(news_texts)
+            raw_text = complete_text(prompt, temperature=0.1, json_mode=True, tag="analysis:news_batch") or ""
+        except Exception:
+            return [failed_analysis("provider_error") for _ in news_texts]
+        return parse_news_batch(raw_text, len(news_texts))
+    except Exception:
+        return [failed_analysis("invalid_output") for _ in news_texts]
 
 
 # ── 受災採購清單 (Impacted PO List) ────────────────────────────────────
 
 def get_impacted_pos(region_key=None, country=None, supplier_id=None):
     """依熱點（地區/國家）或供應商 ID 篩選未結案採購單，回傳：採購單號、供應商、關鍵物料、預計延遲、替代建議。"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     where, params = ["(p.status IS NULL OR p.status NOT IN ('已完成','已取消'))"], []
     if supplier_id:
         where.append("p.supplier_id = ?")
         params.append(supplier_id)
-    if region_key:
-        where_sub, params_sub = _get_expanded_region_where(region_key, None, prefix="s.")
-        where.extend(where_sub)
-        params.extend(params_sub)
-    if country:
-        where_sub, params_sub = _get_expanded_region_where(None, country, prefix="s.")
+    if region_key or country:
+        where_sub, params_sub = _get_expanded_region_where(region_key, country, prefix="s.")
         where.extend(where_sub)
         params.extend(params_sub)
     q = """
     SELECT p.po_id, p.supplier_id, s.name as supplier_name, s.country, s.region,
-           p.estimated_delay_days, p.alternative_suggestion
+           p.estimated_delay_days, p.alternative_suggestion, p.total_amount, p.status
     FROM purchase_orders p
     JOIN suppliers s ON p.supplier_id = s.supplier_id
     WHERE """ + " AND ".join(where)
@@ -702,7 +792,7 @@ def get_impacted_pos(region_key=None, country=None, supplier_id=None):
     if pos is None or pos.empty:
         return []
     out = []
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     for _, row in pos.iterrows():
         items = __pd_read(
             "SELECT product_id FROM purchase_order_items WHERE po_id = ?", conn, params=(row["po_id"],)
@@ -732,27 +822,32 @@ def get_impacted_pos(region_key=None, country=None, supplier_id=None):
         alt = str(alt_raw).strip() if (_pd.notna(alt_raw) and alt_raw) else "—"
         out.append({
             "po_id": row["po_id"],
+            "supplier_id": row["supplier_id"],
             "supplier_name": row["supplier_name"],
+            "country": _clean_text(row.get("country")),
+            "region": _clean_text(row.get("region")),
             "key_materials": key_materials,
             "estimated_delay": delay_str,
+            "estimated_delay_days": int(delay) if (delay is not None and delay == delay) else None,
             "alternative_suggestion": alt,
+            "alternative_suggestion_raw": alt if alt != "—" else "",
+            "total_amount": float(row.get("total_amount") or 0) if row.get("total_amount") == row.get("total_amount") else 0.0,
+            "status": _clean_text(row.get("status")),
         })
     conn.close()
     return out
 
 
-def update_po_impact(
-    po_id, estimated_delay_days=None, alternative_suggestion=None, *, actor=None
-):
-    """更新採購單的預計延遲天數與替代建議。"""
-    require_capability(actor, ERP_POLICY_WRITE)
-    conn = sqlite3.connect(DB_FILE)
-    if estimated_delay_days is not None:
-        conn.execute("UPDATE purchase_orders SET estimated_delay_days = ? WHERE po_id = ?", (estimated_delay_days, po_id))
-    if alternative_suggestion is not None:
-        conn.execute("UPDATE purchase_orders SET alternative_suggestion = ? WHERE po_id = ?", (alternative_suggestion, po_id))
-    conn.commit()
-    conn.close()
+def update_po_impact(po_id, estimated_delay_days=None, alternative_suggestion=None, *, actor=None):
+    """Planner may change assessment notes, never the underlying transaction."""
+    require_capability(actor, RISK_WORKSPACE_WRITE)
+    days = number(estimated_delay_days, maximum=365, integer=True) if estimated_delay_days is not None else None
+    suggestion = text(alternative_suggestion) if alternative_suggestion is not None else None
+    with connect_db(DB_FILE) as conn:
+        if days is not None:
+            conn.execute("UPDATE purchase_orders SET estimated_delay_days=? WHERE po_id=?", (days,po_id))
+        if suggestion is not None:
+            conn.execute("UPDATE purchase_orders SET alternative_suggestion=? WHERE po_id=?", (suggestion,po_id))
 
 
 def get_ai_alternative_suggestions(api_key="", impacted_list=None, hotspot_name="", model: str | None = None):
@@ -771,7 +866,6 @@ def get_ai_alternative_suggestions(api_key="", impacted_list=None, hotspot_name=
         suppliers = get_suppliers_for_map()
         if suppliers is not None and not suppliers.empty:
             # 當前熱點可能為「墨西哥 中北部」或「台灣 北區」，用關鍵字排除
-            hotspot_parts = [p.strip() for p in (hotspot_name or "").replace(" ", " ").split() if p.strip()]
             seen = set()
             parts = []
             for _, s in suppliers.iterrows():
@@ -780,7 +874,7 @@ def get_ai_alternative_suggestions(api_key="", impacted_list=None, hotspot_name=
                 if not country:
                     continue
                 # 若該據點屬於當前熱點（國家或地區名重合）則跳過
-                if any(p in country or p in region for p in hotspot_parts):
+                if matches_location(country, region, hotspot_name):
                     continue
                 key = f"{country} {region}".strip()
                 if key not in seen:
@@ -805,20 +899,25 @@ def get_ai_alternative_suggestions(api_key="", impacted_list=None, hotspot_name=
         import json
         from backend.llm_client import complete_text
         raw = (complete_text(prompt, json_mode=True, tag="analysis:po_suggest") or "").strip()
-        payload = json.loads(re.sub(r"```json\s*|```\s*", "", raw))
-        items = payload.get("results", []) if isinstance(payload, dict) else payload
-
-        result = []
-        for it in items or []:
-            it = it or {}
-            po_id = str(it.get("po_id") or "").strip()
+        payload = json_payload(raw)
+        items = payload.get("results") if isinstance(payload, dict) else payload
+        if not isinstance(items, list):
+            raise ValueError("Invalid PO response")
+        result, seen = [], set()
+        for it in items:
+            if not isinstance(it, dict):
+                raise ValueError("Invalid PO item")
+            po_id = text(it.get("po_id"))
             if po_id not in po_ids:
                 continue
+            if po_id in seen:
+                raise ValueError("Duplicate PO result")
+            seen.add(po_id)
             try:
-                delay_days = int(it.get("延遲天數", 7) or 7)
-            except (TypeError, ValueError):
-                delay_days = 7
-            suggestion = str(it.get("建議") or "").strip()
+                delay_days = number(it["延遲天數"], maximum=365, integer=True, nullable=True)
+                suggestion = text(it["建議"])
+            except (KeyError, TypeError, ValueError):
+                continue
             if suggestion:
                 result.append({"po_id": po_id, "estimated_delay_days": delay_days,
                                "alternative_suggestion": suggestion})
@@ -838,7 +937,7 @@ def what_if_simulation(
 ):
     """依使用者情境問題，結合 ERP 供應商、未結案採購單、庫存安全天數，由 AI 回覆影響與建議。model 為 Gemini 模型 ID。"""
     require_capability(actor, RISK_WHAT_IF_RUN)
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     suppliers = __pd_read("SELECT supplier_id, name, country, region FROM suppliers", conn)
     pos = __pd_read(
         """SELECT p.po_id, p.supplier_id, s.name, s.country, s.region, p.estimated_delay_days, p.alternative_suggestion
@@ -874,9 +973,9 @@ def what_if_simulation(
 
 def get_risk_events_list(limit=20):
     """取得風險事件列表（id, event_type, region, country, impact_days, description, created_at）。"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     df = __pd_read(
-        "SELECT id, event_type, region, country, impact_days, description, created_at, news_id FROM supply_chain_events ORDER BY id DESC LIMIT ?",
+        f"SELECT id, event_type, region, country, impact_days, description, created_at, news_id FROM supply_chain_events WHERE {_VALID_EVENT_SOURCE} ORDER BY COALESCE(created_at,'') DESC,id DESC LIMIT ?",
         conn,
         params=(limit,),
     )
@@ -889,14 +988,14 @@ def get_active_risk_events(limit=30):
 
 def get_supply_chain_summary_kpis():
     """計算供應鏈風險總覽 KPI：30天內事件數、去重後的受影響供應商數與銷售訂單數。"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     # 1. 30 天內事件數
     since = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M")
-    event_count = conn.execute("SELECT COUNT(*) FROM supply_chain_events WHERE created_at >= ?", (since,)).fetchone()[0]
+    event_count = conn.execute(f"SELECT COUNT(*) FROM supply_chain_events WHERE {_VALID_EVENT_SOURCE} AND created_at >= ?", (since,)).fetchone()[0]
     
     # 2. 受波及供應商與訂單 (去重)
     # 取得最近 50 件事件作為代表性 KPI
-    active_events = conn.execute("SELECT region, country, impact_days FROM supply_chain_events ORDER BY id DESC LIMIT 50").fetchall()
+    active_events = conn.execute(f"SELECT region, country, impact_days FROM supply_chain_events WHERE {_VALID_EVENT_SOURCE} ORDER BY id DESC LIMIT 50").fetchall()
     conn.close()
     
     affected_suppliers = set()
@@ -919,13 +1018,13 @@ def get_supply_chain_summary_kpis():
 
 def get_historical_event_precedents():
     """從資料庫統計各類事件的平均延遲天數，作為 AI 推估的依據。"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     try:
         # 統計各類事件的平均值與次數
         res = conn.execute(
-            """SELECT event_type, AVG(impact_days) as avg_days, COUNT(*) as cnt 
+            f"""SELECT event_type, AVG(impact_days) as avg_days, COUNT(*) as cnt
                FROM supply_chain_events 
-               WHERE impact_days > 0 
+               WHERE {_VALID_EVENT_SOURCE} AND impact_days > 0
                GROUP BY event_type 
                ORDER BY cnt DESC"""
         ).fetchall()
@@ -936,42 +1035,35 @@ def get_historical_event_precedents():
         conn.close()
 
 
-def add_risk_event(
-    event_type, region, country, impact_days, description, news_id=None, *, actor=None
-):
-    """新增或更新風險事件（如果該區域已存在事件則覆蓋）。"""
+def add_risk_event(event_type, region, country, impact_days, description, news_id=None, *, actor=None):
+    from .risk_contract import validate_event
     require_capability(actor, RISK_WORKSPACE_WRITE)
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    
-    # 核心優化：直接覆寫同區域的正式事件 (news_id 為空者)
-    c.execute(
-        """SELECT id FROM supply_chain_events 
-           WHERE COALESCE(country, '') = ? AND COALESCE(region, '') = ? AND news_id IS ?""",
-        (country or "", region or "", news_id)
-    )
-    existing = c.fetchone()
-    
-    if existing:
-        event_id = existing[0]
-        c.execute(
-            """UPDATE supply_chain_events 
-               SET event_type=?, impact_days=?, description=?, created_at=?
-               WHERE id=?""",
-            (event_type, impact_days, description or None, datetime.now().strftime("%Y-%m-%d %H:%M"), event_id)
-        )
-        conn.commit()
-        conn.close()
-        return event_id
-    else:
-        c.execute(
-            "INSERT INTO supply_chain_events (event_type, region, country, impact_days, description, created_at, news_id) VALUES (?,?,?,?,?,?,?)",
-            (event_type, region or None, country or None, impact_days, description or None, datetime.now().strftime("%Y-%m-%d %H:%M"), news_id)
-        )
-        new_id = c.lastrowid
-        conn.commit()
-        conn.close()
-        return new_id
+    with connect_db(DB_FILE) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        event_type, region, country, impact_days, description, news_id = validate_event(conn, event_type, region, country, impact_days, description, news_id)
+        row = conn.execute("SELECT id FROM supply_chain_events WHERE COALESCE(country,'')=? AND COALESCE(region,'')=? AND event_type=? AND news_id IS ?", (country, region, event_type, news_id)).fetchone()
+        if row:
+            conn.execute("UPDATE supply_chain_events SET impact_days=?, description=?, created_at=? WHERE id=?", (impact_days, description, datetime.now().isoformat(), row[0]))
+            return row[0]
+        cur = conn.execute("INSERT INTO supply_chain_events(event_type,region,country,impact_days,description,created_at,news_id) VALUES(?,?,?,?,?,?,?)", (event_type,region,country,impact_days,description,datetime.now().isoformat(),news_id))
+        return cur.lastrowid
+
+
+def update_risk_event(event_id, *, event_type=None, impact_days=None, description=None, actor=None):
+    from .risk_contract import validate_event
+    require_capability(actor, RISK_WORKSPACE_WRITE)
+    event_id = number(event_id, maximum=2**53-1, integer=True)
+    with connect_db(DB_FILE) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT event_type,region,country,impact_days,description,news_id FROM supply_chain_events WHERE id=?", (event_id,)).fetchone()
+        if not row:
+            return False
+        values = validate_event(conn, row[0] if event_type is None else event_type, row[1] or '', row[2] or '', row[3] if impact_days is None else impact_days, (row[4] or '') if description is None else description, row[5])
+        collision = conn.execute("SELECT id FROM supply_chain_events WHERE COALESCE(country,'')=? AND COALESCE(region,'')=? AND event_type=? AND news_id IS ? AND id<>?", (values[2],values[1],values[0],values[5],event_id)).fetchone()
+        if collision:
+            raise ValueError("另一事件已使用相同類型與來源；請更新該事件")
+        conn.execute("UPDATE supply_chain_events SET event_type=?,impact_days=?,description=?,created_at=? WHERE id=?", (values[0],values[3],values[4],datetime.now().isoformat(),event_id))
+        return True
 
 
 def delete_risk_event(event_id, *, actor=None):
@@ -982,7 +1074,7 @@ def delete_risk_event(event_id, *, actor=None):
 
 def get_affected_suppliers_by_event(region: str, country: str = None):
     """依地區與國家篩選受影響的正式供應商（僅限 is_official=1）。"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     where, params = _get_expanded_region_where(region, country)
     if not where:
         conn.close()
@@ -1002,7 +1094,7 @@ def get_affected_sales_orders_by_event(region: str, country: str, impact_days: i
     Trace: Suppliers (Region) -> Purchase Orders (Pending) -> Products -> BOM (Finished Good) -> Sales Orders (Pending).
     Returns list of dicts with order details.
     """
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     
     where, params = _get_expanded_region_where(region, country, prefix="s.")
     if not where:
@@ -1078,16 +1170,12 @@ def get_stockout_alerts_for_event(region: str, country: str, impact_days: int):
     計算因風險事件導致的採購延遲，是否會造成庫存斷鏈（量 < 0）或跌破安全水位（量 < reorder_point）。
     回傳列表：包含商品名稱、現有庫存、預估延期消耗量、預估剩餘庫存、警報等級。
     """
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     where = []
     params = []
     
-    combined_loc = f"{region} {country}".strip()
-    if combined_loc:
-        where_sub, params_sub = _get_expanded_region_where(combined_loc, None, prefix="s.")
-        where.extend(where_sub)
-        params.extend(params_sub)
-        
+    where, params = _get_expanded_region_where(region, country, prefix="s.")
+
     if not where:
         conn.close()
         return []
@@ -1168,7 +1256,7 @@ def increase_safety_stock_for_event(
     基準水位會被保存在 baseline_reorder_point 中以供日後還原。
     """
     require_capability(actor, ERP_POLICY_WRITE)
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     where, params = _get_expanded_region_where(region, country, prefix="s.")
     if not where:
         conn.close()
@@ -1220,7 +1308,7 @@ def increase_safety_stock_for_event(
 def restore_all_rop_to_baseline(*, actor=None):
     """將所有產品的安全水位還原至基準值 (baseline_reorder_point)。"""
     require_capability(actor, ERP_POLICY_WRITE)
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     # 僅針對有設定 baseline 的進行還原
     conn.execute("UPDATE inventory SET reorder_point = baseline_reorder_point WHERE baseline_reorder_point IS NOT NULL")
     conn.commit()
@@ -1229,7 +1317,7 @@ def restore_all_rop_to_baseline(*, actor=None):
 def update_reorder_point(product_id: str, new_reorder_point: int, *, actor=None):
     """手動更新指定物料的安全庫存水位。"""
     require_capability(actor, ERP_POLICY_WRITE)
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     conn.execute(
         "UPDATE inventory SET reorder_point = ? WHERE product_id = ?",
         (int(new_reorder_point), product_id)
@@ -1239,7 +1327,7 @@ def update_reorder_point(product_id: str, new_reorder_point: int, *, actor=None)
 
 def get_event_risk_scores():
     """取得事件類型對應的風險分數（event_type -> score）。"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     df = __pd_read(
         "SELECT risk_type, risk_key, risk_score, weight FROM esg_risk_factors WHERE risk_type = 'event_type'", conn)
     conn.close()
@@ -1250,7 +1338,7 @@ def get_event_risk_scores():
 
 def get_region_risk_scores():
     """取得地區對應的風險分數（region key -> score）。"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     df = __pd_read("SELECT risk_type, risk_key, risk_score, weight FROM esg_risk_factors WHERE risk_type = 'region'", conn)
     conn.close()
     if df is None or df.empty:
@@ -1262,7 +1350,7 @@ def get_region_risk_scores():
 
 def get_risk_factors():
     """取得所有風險係數（id, 類型, 代碼, 風險分數, 權重, 備註, 更新時間）。"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     df = __pd_read(
         "SELECT id, risk_type as 類型, risk_key as 代碼, risk_score as 風險分數, weight as 權重, note as 備註, updated_at as 更新時間 FROM esg_risk_factors ORDER BY risk_type, risk_key",
         conn,
@@ -1273,7 +1361,7 @@ def get_risk_factors():
 
 def get_risk_factors_raw():
     """取得原始欄位名的風險係數（供加權計算、預覽用）。"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     df = __pd_read("SELECT risk_type, risk_key, risk_score, weight FROM esg_risk_factors", conn)
     conn.close()
     return df
@@ -1301,7 +1389,7 @@ def delete_risk_factor(factor_id, *, actor=None):
 def clear_all_risk_factors(*, actor=None):
     """清空全部風險係數（供重新實作或重置使用）。"""
     require_capability(actor, RISK_WORKSPACE_WRITE)
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     conn.execute("DELETE FROM esg_risk_factors")
     conn.commit()
     conn.close()
@@ -1320,7 +1408,7 @@ def get_geographic_risk_display():
         seen.add(name)
         score = 0
         for rk, rs in region_scores.items():
-            if rk in name or name in rk:
+            if matches_location(name, name, rk):
                 score = max(score, min(100, rs))
                 break
         if score == 0 and name in default_fallback:
@@ -1377,7 +1465,7 @@ def get_risk_ai_suggestions(api_key: str = "", news_context: str = "", region_su
 def load_preset_risk_factors(*, actor=None):
     """載入預設風險係數範本（地區、事件類型、供應商類別）。"""
     require_capability(actor, RISK_WORKSPACE_WRITE)
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     presets = [
         ("region", "東亞", 60, 1.0, "預設範本"),
@@ -1420,7 +1508,7 @@ def get_procurement_by_region_with_risk():
         supplier_count = int(v.get("supplier_count") or 0)
         risk_score = 0
         for rk, rs in region_scores.items():
-            if rk in display_name or rk in key:
+            if matches_location(*split_location(key), rk):
                 risk_score = max(risk_score, min(100, rs))
         out.append({
             "display_name": display_name,
@@ -1433,7 +1521,7 @@ def get_procurement_by_region_with_risk():
 
 def get_aggregated_risk_preview():
     """綜合風險預覽：據點 × 地區係數 × 供應商類別係數，回傳 list of dict。"""
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect_db(DB_FILE)
     factors = __pd_read("SELECT risk_type, risk_key, risk_score, weight FROM esg_risk_factors", conn)
     sup = __pd_read(
         "SELECT supplier_id as id, name, country, region, risk_level FROM suppliers WHERE (country IS NOT NULL AND country != '') OR (region IS NOT NULL AND region != '')",
@@ -1465,7 +1553,7 @@ def get_aggregated_risk_preview():
     for _, p in partners.iterrows():
         region_score = None
         for k, v in region_map.items():
-            if k in str(p.get("region") or "") or k in str(p.get("country") or ""):
+            if matches_location(p.get("country"), p.get("region"), k):
                 region_score = v
                 break
         cat_score = cat_map.get(str(p.get("risk_level") or "").strip())
@@ -1502,3 +1590,50 @@ def __empty_df():
 def __pd_concat(a, b):
     import pandas as pd
     return pd.concat([a, b], ignore_index=True)
+
+
+def events_for_location(country: str, region: str, events=None) -> list[dict]:
+    """某據點命中的事件（含新聞登錄與人工登錄），依延遲天數→登錄時間新到舊排序。
+
+    前端卡片用它判斷「已有情報／已有應變計畫」，避免每張卡各自重查資料庫。
+    """
+    if events is None:
+        events = get_active_risk_events(limit=HEATMAP_EVENT_LOOKBACK)
+    if events is None:
+        rows = []
+    elif hasattr(events, "iterrows"):
+        rows = [r.to_dict() for _, r in events.iterrows()]
+    else:
+        rows = list(events)
+    matched = [ev for ev in rows if _event_matches_location(ev, country or "", region or "")]
+
+    def _days(ev):
+        try:
+            return int(ev.get("impact_days") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    matched.sort(key=lambda ev: (_days(ev), str(ev.get("created_at") or "")), reverse=True)
+    return matched
+
+
+def is_news_event(ev: dict) -> bool:
+    """news_id 非空 → 由新聞一鍵登錄；否則為人工／AI 建議建立的正式應變事件。"""
+    news_id = ev.get("news_id")
+    if news_id is None:
+        return False
+    try:
+        return not pd.isna(news_id)
+    except (TypeError, ValueError):
+        return True
+
+
+def get_heatmap_ai_summary(api_key="", news_context="", reference_date=None, model=None, *, news_items=None, actor=None):
+    """Compatibility tuple for existing callers; structured status is available below."""
+    result = get_heatmap_ai_analysis(api_key, news_context, reference_date, model, news_items=news_items, actor=actor)
+    return result["summary"], result["updates"], result["events"]
+
+
+
+def get_heatmap_ai_analysis(api_key="", news_context="", reference_date=None, model=None, *, news_items=None, actor=None, persist=True):
+    return analyze_heatmap_risk(news_items, news_context=news_context, reference_date=reference_date, actor=actor, persist=persist)

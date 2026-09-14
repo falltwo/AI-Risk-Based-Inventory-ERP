@@ -611,6 +611,8 @@ class ToolGateway:
 
     def _execute(self, tool_name: str, args: dict, role: str) -> GatewayResult:
         """實際執行工具函式"""
+        if tool_name in {"rollback_inventory", "cancel_order"}:
+            return GatewayResult(status="denied", message="沖銷須使用 reverse_approval，綁定原始審批及執行收據。")
         try:
             import inspect
             func   = tools_mapping[tool_name]
