@@ -43,6 +43,56 @@ def _digest(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def build_what_if_decision_draft(
+    *,
+    question: str,
+    answer: str,
+    model_name: str,
+) -> dict[str, Any]:
+    """Turn a completed What-if response into a reviewable, *unpersisted* draft.
+
+    The What-if prompt currently returns prose, not a reliable numeric risk score or
+    a specific affected SKU.  This adapter deliberately uses a neutral provisional
+    score and a ``request_review`` recommendation.  A human must verify those
+    fields and explicitly submit the draft before it becomes a Decision Record.
+    """
+    question = str(question or "").strip()
+    answer = str(answer or "").strip()
+    model_name = str(model_name or "").strip()
+    if not question or not answer or not model_name:
+        raise ValueError("What-if 草稿需要情境問題、AI 回覆與模型名稱。")
+    if answer.startswith("模擬分析暫時無法產生："):
+        raise ValueError("What-if 分析失敗，不能建立決策草稿。")
+
+    captured_at = _now()
+    evidence_id = f"what-if:{hashlib.sha256((question + answer).encode('utf-8')).hexdigest()[:16]}"
+    return {
+        "decision_type": "supply_chain_what_if_response",
+        "model_name": model_name,
+        "ai_output": {
+            "recommendation": "request_review",
+            "reasoning": answer,
+            "risk_level": "medium",
+            "evidence_ids": [evidence_id],
+            "limitations": (
+                "What-if 回覆為情境推估；風險分數、受影響項目與最終處置"
+                "必須由人員依當下 ERP 資料覆核。"
+            ),
+        },
+        "evidence_snapshot": {
+            "risk_score": 50,
+            "data_as_of": captured_at,
+            "sources": [
+                {
+                    "name": "What-if 情境分析（ERP 供應商、採購單與庫存快照）",
+                    "as_of": captured_at,
+                }
+            ],
+            "affected_entity": question,
+        },
+    }
+
+
 def validate_ai_output(output: Mapping[str, Any]) -> dict[str, Any]:
     """Accept only the small, reviewable AI recommendation contract."""
     if not isinstance(output, Mapping):

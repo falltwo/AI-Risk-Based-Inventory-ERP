@@ -88,7 +88,7 @@ def render(*, username: str) -> None:
     st.markdown("<div class='premium-title'>🧠 AI 決策證據與回饋</div>", unsafe_allow_html=True)
     st.caption("AI 只提出結構化建議；資料快照、人員決定與結果回饋均可追溯。")
 
-    records_tab, create_tab = st.tabs(["決策紀錄", "建立示範建議"])
+    records_tab, create_tab = st.tabs(["決策紀錄", "建立／匯入建議"])
     with records_tab:
         records = list_decision_records(actor=principal.username)
         if not records:
@@ -100,23 +100,43 @@ def render(*, username: str) -> None:
         if not can_write:
             st.info("你可查看證據與決策，但建立、採納與回饋需要 L2 決策權限。")
             return
-        st.caption("這個表單建立一筆可驗證的示範建議；之後會由實際 AI 工作流自動填入相同結構。")
+        draft = st.session_state.pop("decision_prefill_pending", None)
+        if draft:
+            snapshot = draft["evidence_snapshot"]
+            output = draft["ai_output"]
+            st.session_state.update({
+                "decision_entity": snapshot["affected_entity"],
+                "decision_score": int(snapshot["risk_score"]),
+                "decision_source": snapshot["sources"][0]["name"],
+                "decision_as_of": snapshot["data_as_of"],
+                "decision_recommendation": output["recommendation"],
+                "decision_risk_level": output["risk_level"],
+                "decision_reasoning": output["reasoning"],
+                "decision_limitations": output["limitations"],
+                "decision_model_name": draft["model_name"],
+                "decision_type": draft["decision_type"],
+            })
+            st.success("已從 What-if 分析帶入草稿。請確認或調整欄位後，再建立正式決策紀錄。")
+        else:
+            st.caption("可手動建立建議，或從 L2 What-if 模擬分析帶入草稿。正式紀錄建立前仍須由人員確認。")
         with st.form("create_decision_record"):
-            entity = st.text_input("受影響項目／供應商", placeholder="例如：SUP-021 / 零件 P-100")
-            score = st.slider("風險分數", 0, 100, 70)
-            source_name = st.text_input("資料來源", value="供應鏈風險地圖")
-            as_of = st.text_input("資料截至時間（UTC）", value=datetime.now(timezone.utc).replace(microsecond=0).isoformat())
-            recommendation = st.selectbox("AI 建議", list(_RECOMMENDATION_LABELS), format_func=_RECOMMENDATION_LABELS.get)
-            risk_level = st.selectbox("AI 判定風險等級", ["low", "medium", "high"], index=2)
-            reasoning = st.text_area("AI 依據說明", placeholder="請說明為何提出此建議。")
-            limitations = st.text_area("資料限制", value="此建議僅供人工覆核，未直接執行任何 ERP 異動。")
+            entity = st.text_input("受影響項目／供應商", placeholder="例如：SUP-021 / 零件 P-100", key="decision_entity")
+            score = st.slider("風險分數", 0, 100, 70, key="decision_score")
+            source_name = st.text_input("資料來源", value="供應鏈風險地圖", key="decision_source")
+            as_of = st.text_input("資料截至時間（UTC）", value=datetime.now(timezone.utc).replace(microsecond=0).isoformat(), key="decision_as_of")
+            recommendation = st.selectbox("AI 建議", list(_RECOMMENDATION_LABELS), format_func=_RECOMMENDATION_LABELS.get, key="decision_recommendation")
+            risk_level = st.selectbox("AI 判定風險等級", ["low", "medium", "high"], index=2, key="decision_risk_level")
+            reasoning = st.text_area("AI 依據說明", placeholder="請說明為何提出此建議。", key="decision_reasoning")
+            limitations = st.text_area("資料限制", value="此建議僅供人工覆核，未直接執行任何 ERP 異動。", key="decision_limitations")
+            model_name = st.text_input("模型名稱", value="manual-structured-demo", key="decision_model_name")
+            decision_type = st.text_input("決策類型", value="supply_chain_risk_response", key="decision_type")
             submit = st.form_submit_button("建立可驗證建議")
         if submit:
             try:
                 create_decision_record(
                     actor=principal.username,
-                    decision_type="supply_chain_risk_response",
-                    model_name="manual-structured-demo",
+                    decision_type=decision_type,
+                    model_name=model_name,
                     ai_output={
                         "recommendation": recommendation,
                         "reasoning": reasoning,

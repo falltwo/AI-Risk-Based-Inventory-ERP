@@ -3,6 +3,7 @@ import pytest
 from backend import database
 from backend.decision_evidence import (
     add_outcome_feedback,
+    build_what_if_decision_draft,
     create_decision_record,
     decide_decision_record,
     get_decision_record,
@@ -68,6 +69,26 @@ def test_invalid_structured_output_and_invalid_snapshot_are_rejected(decision_db
             actor="planner", decision_type="supply_chain_risk_response",
             model_name="gemini-test", ai_output=_output(),
             evidence_snapshot={**_snapshot(), "risk_score": 101},
+        )
+
+
+def test_what_if_response_becomes_reviewable_but_unpersisted_draft():
+    draft = build_what_if_decision_draft(
+        question="紅海航線中斷兩週，哪些採購單會受影響？",
+        answer="採購單 PO-101 與 PO-102 可能延遲，建議人工覆核。",
+        model_name="gemini/gemini-2.5-flash",
+    )
+
+    assert draft["decision_type"] == "supply_chain_what_if_response"
+    assert draft["ai_output"]["recommendation"] == "request_review"
+    assert draft["ai_output"]["reasoning"].startswith("採購單 PO-101")
+    assert draft["evidence_snapshot"]["risk_score"] == 50
+    assert "紅海航線" in draft["evidence_snapshot"]["affected_entity"]
+    assert draft["ai_output"] == validate_ai_output(draft["ai_output"])
+
+    with pytest.raises(ValueError, match="分析失敗"):
+        build_what_if_decision_draft(
+            question="測試", answer="模擬分析暫時無法產生：缺少金鑰", model_name="gemini/test"
         )
 
 

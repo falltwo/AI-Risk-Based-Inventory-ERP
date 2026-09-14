@@ -500,3 +500,24 @@ def render_what_if_analysis(
             st.info(clean_answer)
             st.caption("範例回覆：「這將影響您 40% 的原材料供應。建議現在就將 X 物料的安全庫存從 30 天提高到 60 天。」")
 
+            # What-if 回覆是自由文字，先轉為「待人工確認」的結構化草稿，
+            # 而不是直接建立紀錄或執行 ERP 異動。
+            if not clean_answer.startswith("模擬分析暫時無法產生："):
+                from backend.decision_evidence import build_what_if_decision_draft
+
+                try:
+                    st.session_state["whatif_decision_draft"] = build_what_if_decision_draft(
+                        question=user_question,
+                        answer=clean_answer,
+                        model_name=f"gemini/{gemini_model}",
+                    )
+                except ValueError as exc:
+                    st.warning(f"無法產生決策草稿：{exc}")
+
+        draft = st.session_state.get("whatif_decision_draft")
+        if draft:
+            st.success("已準備好可驗證的決策草稿；請先覆核風險分數與受影響項目，再送出供人員決定。")
+            if st.button("🧾 將此分析帶入『決策證據與回饋』", key="whatif_to_decision"):
+                st.session_state["decision_prefill_pending"] = draft
+                st.rerun()
+
