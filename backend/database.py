@@ -244,12 +244,21 @@ def init_db():
         decision_id TEXT NOT NULL,
         outcome TEXT NOT NULL,
         note TEXT NOT NULL DEFAULT '',
+        action_taken TEXT NOT NULL DEFAULT '',
+        outcome_evidence TEXT NOT NULL DEFAULT '',
         recorded_by TEXT NOT NULL,
         recorded_at TEXT NOT NULL,
         FOREIGN KEY(decision_id) REFERENCES decision_records(decision_id)
     )''')
     c.execute('''CREATE INDEX IF NOT EXISTS ix_decision_records_created
         ON decision_records(organization_id, created_at DESC)''')
+
+    # 讓已建立的舊資料庫也可逐步加入較完整的回饋欄位。
+    for column_name in ("action_taken", "outcome_evidence"):
+        try:
+            c.execute(f"ALTER TABLE decision_feedback ADD COLUMN {column_name} TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
 
     c.execute('''CREATE TABLE IF NOT EXISTS effect_receipts (
         receipt_id INTEGER PRIMARY KEY AUTOINCREMENT,

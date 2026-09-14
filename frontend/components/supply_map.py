@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+from datetime import datetime, timezone
 from backend.supply_chain_news import get_news_from_db
 from backend.supply_chain_risk import (
     get_risk_heatmap_data,
@@ -69,6 +70,28 @@ def render_risk_heatmap(key: str = "risk_heatmap", heatmap_rows=None):
             coloraxis_colorbar=dict(title="影響 %"),
         )
         st.plotly_chart(fig, use_container_width=True, key=key)
+
+
+def _render_heatmap_data_freshness(heatmap_rows) -> None:
+    """在既有地圖下說明風險數值的來源與最近更新時間。"""
+    st.caption("資料來源：供應商據點、已登錄風險事件、地區風險係數與區域採購集中度。")
+    timestamps = []
+    for row in heatmap_rows:
+        value = row.get("updated_at")
+        if not value:
+            continue
+        try:
+            timestamps.append(datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc))
+        except ValueError:
+            continue
+    if not timestamps:
+        st.caption("資料時間：依目前 ERP 資料即時計算；尚無 AI 摘要更新時間。")
+        return
+    newest = max(timestamps)
+    age = datetime.now(timezone.utc) - newest
+    st.caption(f"最近 AI 摘要更新：{newest.isoformat(timespec='seconds')}（UTC）")
+    if age.total_seconds() > 24 * 60 * 60:
+        st.warning("這份 AI 風險摘要已超過 24 小時未更新；請先更新情報或重新產生摘要，再據此做決策。")
 
 def render_risk_shortcuts(key: str, heatmap_rows=None, *, actor: str):
     """區域風險快速分析小卡。"""
@@ -276,6 +299,7 @@ def render_supply_chain_map(
 
     # ── 即時風險熱圖 (Risk Heatmap) ─────────────────────────────────
     render_risk_heatmap(key="detail_heatmap", heatmap_rows=heatmap_rows)
+    _render_heatmap_data_freshness(heatmap_rows)
 
     # 高風險供應據點可直接送入既有的「決策證據與回饋」流程，但不直接執行採購。
     high_risk_nodes = [row for row in heatmap_rows if float(row.get("risk_pct") or 0) >= 70]

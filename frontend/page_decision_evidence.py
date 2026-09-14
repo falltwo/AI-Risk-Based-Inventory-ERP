@@ -68,15 +68,28 @@ def _render_record(record: dict, actor: str, can_write: bool) -> None:
         if record["status"] == "adopted" and can_write:
             with st.expander("新增實際結果回饋"):
                 result = st.selectbox("觀察結果", ["effective", "ineffective", "inconclusive"], format_func=lambda value: {"effective": "有效", "ineffective": "無效", "inconclusive": "尚無結論"}[value], key=f"feedback_{record['decision_id']}")
-                note = st.text_area("回饋說明", key=f"feedback_note_{record['decision_id']}")
+                action_taken = st.text_area("實際採取的動作（必填）", placeholder="例如：將 PO-102 改由備援供應商出貨。", key=f"feedback_action_{record['decision_id']}")
+                outcome_evidence = st.text_area("結果依據（必填）", placeholder="例如：新供應商確認交期縮短為 7 天，採購單紀錄已更新。", key=f"feedback_evidence_{record['decision_id']}")
+                note = st.text_area("補充說明（選填）", key=f"feedback_note_{record['decision_id']}")
                 if st.button("儲存回饋", key=f"save_feedback_{record['decision_id']}"):
-                    add_outcome_feedback(actor=actor, decision_id=record["decision_id"], outcome=result, note=note)
-                    st.rerun()
+                    try:
+                        add_outcome_feedback(
+                            actor=actor, decision_id=record["decision_id"], outcome=result,
+                            action_taken=action_taken, outcome_evidence=outcome_evidence, note=note,
+                        )
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
 
         if record["decided_by"]:
             st.caption(f"人員決定：{record['decided_by']}｜{record['decided_at']}｜{record['decision_reason'] or '採納未填原因'}")
         for feedback in record["feedback"]:
-            st.info(f"結果回饋：{feedback['outcome']}｜{feedback['recorded_by']}｜{feedback['recorded_at']}\n\n{feedback['note']}")
+            st.info(
+                f"結果回饋：{feedback['outcome']}｜{feedback['recorded_by']}｜{feedback['recorded_at']}\n\n"
+                f"採取動作：{feedback.get('action_taken') or '舊紀錄未填寫'}\n\n"
+                f"結果依據：{feedback.get('outcome_evidence') or '舊紀錄未填寫'}"
+                + (f"\n\n補充：{feedback['note']}" if feedback['note'] else "")
+            )
 
 
 def render(*, username: str) -> None:
@@ -93,6 +106,17 @@ def render(*, username: str) -> None:
         records = list_decision_records(actor=principal.username)
         if not records:
             st.info("尚無決策紀錄。請由具有 L2 決策權限的人建立第一筆示範建議。")
+        else:
+            adopted = sum(record["status"] == "adopted" for record in records)
+            decided = sum(record["status"] in {"adopted", "rejected", "needs_more_evidence"} for record in records)
+            feedback = [item for record in records for item in record["feedback"]]
+            effective = sum(item["outcome"] == "effective" for item in feedback)
+            metrics = st.columns(4)
+            metrics[0].metric("決策紀錄", len(records))
+            metrics[1].metric("已完成決定", f"{decided} / {len(records)}")
+            metrics[2].metric("已採納", adopted)
+            metrics[3].metric("已有有效回饋", effective)
+            st.caption("摘要只統計目前帳號可查看的紀錄；回饋需同時附上實際動作與結果依據。")
         for record in records:
             _render_record(record, principal.username, can_write)
 

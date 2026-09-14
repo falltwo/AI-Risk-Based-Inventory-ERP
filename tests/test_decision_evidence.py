@@ -124,10 +124,30 @@ def test_viewer_cannot_create_or_decide_and_adopted_record_accepts_feedback(deci
         decide_decision_record(actor="viewer", decision_id="DEC-TEST-2", outcome="adopted")
     decide_decision_record(actor="planner", decision_id="DEC-TEST-2", outcome="adopted")
     record = add_outcome_feedback(
-        actor="planner", decision_id="DEC-TEST-2", outcome="effective", note="實際延遲已降低。"
+        actor="planner", decision_id="DEC-TEST-2", outcome="effective",
+        action_taken="改由備援供應商出貨。", outcome_evidence="採購單顯示延遲已降低。", note="實際延遲已降低。"
     )
     assert record["feedback"][0]["outcome"] == "effective"
+    assert record["feedback"][0]["action_taken"] == "改由備援供應商出貨。"
     assert get_decision_record(actor="viewer", decision_id="DEC-TEST-2")["status"] == "adopted"
+
+
+def test_feedback_requires_action_and_outcome_evidence(decision_db):
+    create_decision_record(
+        actor="planner", decision_type="supply_chain_risk_response",
+        model_name="gemini-test", ai_output=_output(), evidence_snapshot=_snapshot(), decision_id="DEC-TEST-4",
+    )
+    decide_decision_record(actor="planner", decision_id="DEC-TEST-4", outcome="adopted")
+    with pytest.raises(ValueError, match="實際採取"):
+        add_outcome_feedback(
+            actor="planner", decision_id="DEC-TEST-4", outcome="effective",
+            action_taken="", outcome_evidence="交期已確認。",
+        )
+    with pytest.raises(ValueError, match="結果依據"):
+        add_outcome_feedback(
+            actor="planner", decision_id="DEC-TEST-4", outcome="effective",
+            action_taken="改由備援供應商出貨。", outcome_evidence="",
+        )
 
 
 def test_rejection_requires_reason_and_record_cannot_be_decided_twice(decision_db):

@@ -251,7 +251,7 @@ def get_decision_record(*, actor: str, decision_id: str) -> dict[str, Any]:
         if row is None or row[1] != principal.organization_id:
             raise ValueError("找不到決策紀錄。")
         feedback = conn.execute(
-            """SELECT outcome, note, recorded_by, recorded_at
+            """SELECT outcome, note, action_taken, outcome_evidence, recorded_by, recorded_at
                FROM decision_feedback WHERE decision_id = ? ORDER BY feedback_id""",
             (decision_id,),
         ).fetchall()
@@ -264,7 +264,10 @@ def get_decision_record(*, actor: str, decision_id: str) -> dict[str, Any]:
         "evidence_snapshot": json.loads(row[12]), "snapshot_digest": row[13],
         "data_as_of": row[14],
         "feedback": [
-            {"outcome": item[0], "note": item[1], "recorded_by": item[2], "recorded_at": item[3]}
+            {
+                "outcome": item[0], "note": item[1], "action_taken": item[2],
+                "outcome_evidence": item[3], "recorded_by": item[4], "recorded_at": item[5],
+            }
             for item in feedback
         ],
     }
@@ -302,11 +305,20 @@ def decide_decision_record(*, actor: str, decision_id: str, outcome: str, reason
     return get_decision_record(actor=actor, decision_id=decision_id)
 
 
-def add_outcome_feedback(*, actor: str, decision_id: str, outcome: str, note: str = "") -> dict[str, Any]:
+def add_outcome_feedback(
+    *, actor: str, decision_id: str, outcome: str, action_taken: str, outcome_evidence: str,
+    note: str = "",
+) -> dict[str, Any]:
     principal = require_capability(actor, DECISION_RECORD_WRITE)
     outcome = str(outcome or "").strip()
     if outcome not in _ALLOWED_FEEDBACK:
         raise ValueError("回饋結果不合法。")
+    action_taken = str(action_taken or "").strip()
+    outcome_evidence = str(outcome_evidence or "").strip()
+    if not action_taken:
+        raise ValueError("請填寫實際採取的動作。")
+    if not outcome_evidence:
+        raise ValueError("請填寫結果依據，例如交期、庫存或採購紀錄。")
     with database.transaction(immediate=True) as conn:
         record = conn.execute("SELECT status, organization_id FROM decision_records WHERE decision_id = ?", (decision_id,)).fetchone()
         if record is None or record[1] != principal.organization_id:
@@ -314,8 +326,9 @@ def add_outcome_feedback(*, actor: str, decision_id: str, outcome: str, note: st
         if record[0] != "adopted":
             raise ValueError("只有已採納的建議可新增結果回饋。")
         conn.execute(
-            """INSERT INTO decision_feedback (decision_id, outcome, note, recorded_by, recorded_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            (decision_id, outcome, str(note).strip(), principal.username, _now()),
+            """INSERT INTO decision_feedback
+               (decision_id, outcome, note, action_taken, outcome_evidence, recorded_by, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (decision_id, outcome, str(note).strip(), action_taken, outcome_evidence, principal.username, _now()),
         )
     return get_decision_record(actor=actor, decision_id=decision_id)
