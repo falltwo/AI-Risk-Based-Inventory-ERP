@@ -72,6 +72,19 @@ PO_ALTERNATIVE_SUGGESTION_PROMPT = """你是供應鏈風險分析師。以下為
 WHAT_IF_SYSTEM_PROMPT = """你是一個供應鏈風險分析師。請根據以下 ERP 資料（供應商名單與地區、未結案採購單、庫存與安全庫存設定），回答使用者的「如果…會怎樣」情境問題。
 重點：指出哪些訂單/物料會斷貨、影響比例，並給出具體建議（例如：將 X 物料的安全庫存從 30 天提高到 60 天）。回覆用繁體中文、條列清晰。"""
 
+WHAT_IF_DECISION_JSON_INSTRUCTIONS = """
+你正在提出「供人員審核」的 AI 建議，不可聲稱已執行採購、庫存或其他 ERP 異動。
+只輸出 JSON 物件，不要 Markdown 或其他文字，格式必須是：
+{
+  "recommendation": "monitor" | "request_review" | "propose_alternative_purchase",
+  "risk_level": "low" | "medium" | "high",
+  "risk_score": 0 到 100 的整數,
+  "affected_entity": "受影響的供應商、採購單或物料；不確定時清楚說明範圍",
+  "reasoning": "以繁體中文說明判斷依據與可能影響",
+  "limitations": "以繁體中文說明資料不足、不確定性或需要人工確認的事項"
+}
+"""
+
 WHAT_IF_USER_PROMPT = """【供應商名單與地區】
 {supplier_text}
 

@@ -11,7 +11,7 @@ from backend.supply_chain_risk import (
     get_impacted_pos,
     update_po_impact,
     get_ai_alternative_suggestions,
-    what_if_simulation,
+    what_if_decision_analysis,
 )
 
 
@@ -490,29 +490,23 @@ def render_what_if_analysis(
             key="whatif_question"
         )
         if st.button("執行 What-If 模擬分析", key="whatif_btn"):
-            with st.spinner("AI 正在依供應商、採購單與庫存資料分析情境…"):
-                answer = what_if_simulation(
-                    api_key, user_question, model=gemini_model, actor=actor
-                )
-            st.markdown("**AI 回覆**")
-            # 隱藏技術後綴
-            clean_answer = answer.split("【自動化指令】")[0].strip()
-            st.info(clean_answer)
-            st.caption("範例回覆：「這將影響您 40% 的原材料供應。建議現在就將 X 物料的安全庫存從 30 天提高到 60 天。」")
-
-            # What-if 回覆是自由文字，先轉為「待人工確認」的結構化草稿，
-            # 而不是直接建立紀錄或執行 ERP 異動。
-            if not clean_answer.startswith("模擬分析暫時無法產生："):
-                from backend.decision_evidence import build_what_if_decision_draft
-
-                try:
-                    st.session_state["whatif_decision_draft"] = build_what_if_decision_draft(
-                        question=user_question,
-                        answer=clean_answer,
-                        model_name=f"gemini/{gemini_model}",
+            try:
+                with st.spinner("AI 正在依供應商、採購單與庫存資料分析情境…"):
+                    draft = what_if_decision_analysis(
+                        api_key, user_question, model=gemini_model, actor=actor
                     )
-                except ValueError as exc:
-                    st.warning(f"無法產生決策草稿：{exc}")
+                st.markdown("**AI 判斷與依據**")
+                clean_answer = draft["ai_output"]["reasoning"]
+                st.info(clean_answer)
+                st.caption(
+                    f"AI 建議：{draft['ai_output']['recommendation']}｜"
+                    f"風險等級：{draft['ai_output']['risk_level']}｜"
+                    f"風險分數：{draft['evidence_snapshot']['risk_score']:.0f}/100"
+                )
+                st.caption("範例回覆：「這將影響您 40% 的原材料供應。建議現在就將 X 物料的安全庫存從 30 天提高到 60 天。」")
+                st.session_state["whatif_decision_draft"] = draft
+            except (ValueError, PermissionError) as exc:
+                st.error(str(exc))
 
         draft = st.session_state.get("whatif_decision_draft")
         if draft:
