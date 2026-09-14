@@ -46,6 +46,7 @@ from .region_matching import (
     expanded_region_where as _get_expanded_region_where,
 )
 from .risk_validation import number, text, json_payload, failed_analysis, parse_news_batch, EVENT_TYPES
+from .risk_intelligence import save_ai_risk_summary, get_latest_ai_risk_summary, build_risk_evidence, gate_by_evidence
 
 
 def _fill_coords_from_country(df, country_col="country", lat_col="latitude", lon_col="longitude"):
@@ -85,21 +86,101 @@ def get_customers_for_map():
     return _fill_coords_from_country(df)
 
 
-_VALID_EVENT_SOURCE = """(news_id IS NULL OR news_id IN (
-    SELECT id FROM supply_chain_news WHERE analysis_status='succeeded'
-    AND is_relevant=1 AND estimated_delay IS NOT NULL))"""
+from .risk_contract import valid_event_sql
+
+_VALID_EVENT_SOURCE = valid_event_sql()
 
 
 def get_recent_events_for_delay(limit=50):
     """取得近期供應鏈事件，供地圖判定出貨延遲狀況。"""
     conn = connect_db(DB_FILE)
     df = __pd_read(
-        f"SELECT event_type, region, country, impact_days FROM supply_chain_events WHERE {_VALID_EVENT_SOURCE} ORDER BY id DESC LIMIT ?",
+        f"SELECT event_type, region, country, impact_days, created_at, news_id FROM supply_chain_events WHERE {_VALID_EVENT_SOURCE} ORDER BY COALESCE(created_at, '') DESC, id DESC LIMIT ?",
         conn,
         params=(limit,),
     )
     conn.close()
     return df
+
+
+# ── 熱圖事件加權 ──────────────────────────────────────────────────────
+# 原本「只要有任何事件就 +40」會讓每個有事件的據點都停在 60%，看不出差異。
+# 改為：依「最嚴重事件的延遲天數」給分，多筆事件再加成，逾期事件減半。
+HEATMAP_BASE_RISK = 20.0
+HEATMAP_EVENT_POINTS = ((30, 50), (14, 40), (7, 30), (1, 20), (0, 10))  # (延遲天數下限, 加權)
+HEATMAP_EXTRA_EVENT_BONUS = 5      # 每多一筆事件
+HEATMAP_EXTRA_EVENT_CAP = 15
+HEATMAP_EVENT_STALE_DAYS = 30      # 登錄超過此天數的事件加權減半
+HEATMAP_EVENT_LOOKBACK = 200       # 參與計算的事件筆數上限（依登錄時間新→舊）
+
+
+def _event_points(impact_days) -> float:
+    try:
+        days = max(0, int(impact_days or 0))
+    except (TypeError, ValueError):
+        days = 0
+    for floor, points in HEATMAP_EVENT_POINTS:
+        if days >= floor:
+            return float(points)
+    return 0.0
+
+
+def _clean_text(value) -> str:
+    """DataFrame 的 NaN／None 一律視為空字串（str(nan) 會變成 "nan" 而誤判為有值）。"""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    return "" if text.casefold() in {"nan", "none"} else text
+
+
+def _event_matches_location(ev, country, region):
+    return matches_location(country, region, _clean_text(ev.get("region")), _clean_text(ev.get("country")))
+
+
+def score_region_events(country: str, region: str, events, *, now=None) -> dict:
+    """算出單一據點的事件加權與可讀理由。
+
+    回傳 {"points", "count", "max_days", "reason"}；events 可為 DataFrame 或 list[dict]。
+    """
+    if events is None:
+        rows = []
+    elif hasattr(events, "iterrows"):
+        rows = [r.to_dict() for _, r in events.iterrows()]
+    else:
+        rows = list(events)
+    matched = [ev for ev in rows if _event_matches_location(ev, country or "", region or "")]
+    if not matched:
+        return {"points": 0.0, "count": 0, "max_days": 0, "reason": "近期無登錄事件"}
+
+    reference = now or datetime.now()
+    best = 0.0
+    max_days = 0
+    stale = 0
+    for ev in matched:
+        points = _event_points(ev.get("impact_days"))
+        try:
+            max_days = max(max_days, int(ev.get("impact_days") or 0))
+        except (TypeError, ValueError):
+            pass
+        created = str(ev.get("created_at") or "")[:10]
+        try:
+            age = (reference - datetime.strptime(created, "%Y-%m-%d")).days
+        except ValueError:
+            age = 0
+        if age > HEATMAP_EVENT_STALE_DAYS:
+            points *= 0.5
+            stale += 1
+        best = max(best, points)
+    bonus = min(HEATMAP_EXTRA_EVENT_CAP, HEATMAP_EXTRA_EVENT_BONUS * (len(matched) - 1))
+    reason = f"{len(matched)} 則事件・最長延遲 {max_days} 天"
+    if stale:
+        reason += f"（{stale} 則已逾 {HEATMAP_EVENT_STALE_DAYS} 天）"
+    return {"points": best + bonus, "count": len(matched), "max_days": max_days, "reason": reason}
 
 
 def get_region_procurement_share():
@@ -168,10 +249,9 @@ def get_risk_heatmap_data():
     suppliers = get_suppliers_for_map()
     if suppliers is None or suppliers.empty:
         return []
-    events = get_recent_events_for_delay(20)
+    events = get_recent_events_for_delay(HEATMAP_EVENT_LOOKBACK)
     region_scores = get_region_risk_scores()
     procurement_by_region = get_region_procurement_share()
-    default_risk = 20.0
     seen = set()
     default_rows = []
     for _, s in suppliers.iterrows():
@@ -181,23 +261,25 @@ def get_risk_heatmap_data():
         if key in seen:
             continue
         seen.add(key)
-        risk = default_risk
-        if events is not None and not events.empty:
-            for _, ev in events.iterrows():
-                if matches_location(country, region, ev.get("region"), ev.get("country")) and (ev.get("impact_days") or 0) > 0:
-                    risk = min(100, risk + 40)
-                    break
+        event_score = score_region_events(country, region, events)
+        risk = min(100.0, HEATMAP_BASE_RISK + event_score["points"])
+        reasons = [event_score["reason"]]
         for k, v in region_scores.items():
             if matches_location(country, region, k):
+                if v > risk:
+                    reasons.append(f"地區係數 {k} {v:.0f}%")
                 risk = max(risk, min(100, v))
         if key in procurement_by_region:
             ratio = procurement_by_region[key]["procurement_ratio"]
             if ratio >= 0.35:
-                risk = max(risk, 70)
+                floor = 70
             elif ratio >= 0.15:
-                risk = max(risk, 45)
+                floor = 45
             else:
-                risk = max(risk, min(35, 20 + ratio * 100))
+                floor = min(35, 20 + ratio * 100)
+            if floor > risk:
+                reasons.append(f"採購集中度 {ratio:.0%}")
+            risk = max(risk, floor)
         lat, lon = s.get("latitude"), s.get("longitude")
         if lat is None or lon is None:
             continue
@@ -207,6 +289,9 @@ def get_risk_heatmap_data():
             "latitude": float(lat),
             "longitude": float(lon),
             "risk_pct": round(risk, 1),
+            "risk_reason": "；".join(reasons),
+            "event_count": event_score["count"],
+            "event_max_days": event_score["max_days"],
             "ai_summary": None,
             "updated_at": None,
             "estimated_delay": None,
@@ -237,12 +322,17 @@ def get_risk_heatmap_data():
         rk = row["region_key"]
         if rk in overrides:
             o = overrides[rk]
+            overridden = o.get("risk_pct") is not None
             out.append({
                 "region_key": rk,
                 "display_name": row["display_name"],
                 "latitude": o.get("latitude") if o.get("latitude") is not None else row["latitude"],
                 "longitude": o.get("longitude") if o.get("longitude") is not None else row["longitude"],
-                "risk_pct": o.get("risk_pct") if o.get("risk_pct") is not None else row["risk_pct"],
+                "risk_pct": o.get("risk_pct") if overridden else row["risk_pct"],
+                "risk_reason": (f"AI／人工設定（{o.get('updated_at') or '時間未記錄'}）" if overridden
+                                else row["risk_reason"]),
+                "event_count": row["event_count"],
+                "event_max_days": row["event_max_days"],
                 "ai_summary": o.get("ai_summary"),
                 "updated_at": o.get("updated_at"),
                 "estimated_delay": o.get("estimated_delay"),
@@ -326,21 +416,72 @@ def _coerce_heatmap_events(raw_events) -> list[dict]:
     return out
 
 
-def get_heatmap_ai_summary(api_key="", news_context="", reference_date=None, model=None):
-    """Compatibility tuple for existing callers; structured status is available below."""
-    result = get_heatmap_ai_analysis(api_key, news_context, reference_date, model)
-    return result["summary"], result["updates"], result["events"]
+# ── AI 風險摘要：證據閘門 + 持久化 ───────────────────────────────────
+# 摘要原本只活在 session_state：重新整理就消失、L1 看不到、排程產生的建議事件直接丟掉。
+# 現在每次產生都寫進 risk_ai_summaries，L2 重開頁面與 L1 總覽都讀最新一筆。
+
+AI_SUMMARY_TABLE = "risk_ai_summaries"
+EVIDENCE_DAYS_MULTIPLIER = 2     # AI 建議延遲天數上限 = 證據最長天數 × 此倍率
+EVIDENCE_DAYS_FLOOR = 7          # …但至少允許到這個天數（證據只有 1-2 天時仍可合理外推）
 
 
-def get_heatmap_ai_analysis(api_key="", news_context="", reference_date=None, model=None):
-    """Separate analysis status from display text and actionable suggestions."""
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def _summary_news_context(news_items):
+    from .risk_contract import analyzed_news
+    rows = [analyzed_news(n) for n in news_items or []]
+    return "\n".join(f"{n.get('title') or ''} {n['summary']} [{n['country']} {n['region']}; 預估延遲: {n['estimated_delay'] if n['estimated_delay'] is not None else '未知'}天]" for n in rows if n is not None)
+
+
+def analyze_heatmap_risk(
+    news_items=None, *, news_context: str = "", reference_date: str | None = None,
+    actor=None, persist: bool = True,
+) -> dict:
+    """AI 熱圖摘要（結構化）。
+
+    - news_items：新聞列（含 country/region/category/estimated_delay）→ 同時當 prompt 素材與證據
+    - news_context：舊介面的純文字素材（沒有 news_items 時使用；證據只剩已登錄事件）
+    - actor 有給且 persist=True 時把結果寫進 risk_ai_summaries（需 RISK_WORKSPACE_WRITE）
+    回傳 dict：summary / updates / events / audit / evidence_locations / generated_at /
+              reference_date / news_count / event_count / summary_id / error
+    """
+    import json
+    from backend.llm_client import complete_text
+
+    from .risk_contract import analyzed_news
+    news_items = [n for n in (news_items or []) if analyzed_news(n) is not None]
     reference_date = reference_date or datetime.now().strftime("%Y-%m-%d")
     events_df = get_active_risk_events()
     events_text = "目前尚無已登錄事件。"
     if events_df is not None and not events_df.empty:
         # 只列出最近的 15 筆事件作為背景
+        # region 為 NaN 時 pandas 值為 truthy，原本會把字面 "nan" 餵給模型（模型真的回了「地區欄位為 nan」）
         events_text = "\n".join([
-            f"- 【{row['event_type']}】區域：{row['region'] or row['country']} (預計延遲：{row['impact_days']}天)"
+            f"- 【{_clean_text(row['event_type']) or '其他'}】區域："
+            f"{' '.join(p for p in (_clean_text(row['country']), _clean_text(row['region'])) if p) or '未填'}"
+            f" (預計延遲：{row['impact_days']}天)"
             for _, row in events_df.head(15).iterrows()
         ])
 
@@ -351,8 +492,8 @@ def get_heatmap_ai_analysis(api_key="", news_context="", reference_date=None, mo
         valid_regions = []
         valid_locations = []
         for _, r in valid_regions_df.iterrows():
-            c = str(r['country'] or '').strip()
-            rg = str(r['region'] or '').strip()
+            c = _clean_text(r['country'])
+            rg = _clean_text(r['region'])
             valid_locations.append((c, rg))
             if rg and rg != c:
                 valid_regions.append(f"{c} {rg}")
@@ -365,6 +506,8 @@ def get_heatmap_ai_analysis(api_key="", news_context="", reference_date=None, mo
     finally:
         conn.close()
 
+    if news_items:
+        news_context = _summary_news_context(news_items)
     prompt = HEATMAP_AI_SUMMARY_PROMPT_V2.format(
         reference_date=reference_date,
         events_text=events_text,
@@ -378,16 +521,30 @@ def get_heatmap_ai_analysis(api_key="", news_context="", reference_date=None, mo
         name = f"{country} {region}" if region and region != country else country
         name_expansions.setdefault(country, []).append(name)
 
+    evidence = build_risk_evidence(news_items, events_df)
+    result = {
+        "summary": "",
+        "updates": [],
+        "events": [],
+        "audit": [],
+        "evidence_locations": sorted(evidence["locations"]),
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "reference_date": reference_date,
+        "news_count": len(news_items or []),
+        "event_count": 0 if events_df is None else int(len(events_df)),
+        "summary_id": None,
+        "error": False, "analysis_status": "succeeded", "analysis_error": None,
+        "sources": evidence["sources"], "actor": actor,
+    }
     try:
         # issue #27/#47：統一 LLM 入口 + 結構化輸出（JSON）。
-        # 合法區域檢核由 _gate_heatmap_updates 執行，prompt 只做平述引導；
-        # 原本的 UPDATE:/EVENT: 行解析與正文回填 regex 全數移除。
-        import json
-        from backend.llm_client import complete_text
+        # 合法區域檢核由 _gate_heatmap_updates 執行、證據檢核由 gate_by_evidence 執行，
+        # prompt 只做平述引導。
         raw = (complete_text(prompt, temperature=0.3, json_mode=True,
                              tag="analysis:heatmap") or "").strip()
         if not raw:
-            return dict(analysis_status="failed", analysis_error="empty_response", summary="AI 摘要失敗：模型未回傳內容。", updates=[], events=[])
+            result.update(analysis_status="failed", analysis_error="empty_response", summary="AI 摘要失敗：模型未回傳內容。", error=True)
+            return result
         payload = json_payload(raw)
         if not isinstance(payload, dict) or not isinstance(payload.get("摘要"), str) or not isinstance(payload.get("更新"), list) or not isinstance(payload.get("事件"), list):
             raise ValueError("Invalid heatmap response schema")
@@ -403,10 +560,23 @@ def get_heatmap_ai_analysis(api_key="", news_context="", reference_date=None, mo
             raise ValueError("Missing summary")
         updates = _gate_heatmap_updates(payload.get("更新"), valid_list, name_expansions)
         suggested_events = [e for e in _coerce_heatmap_events(payload.get("事件"))
-                            if any(matches_location(c, r, e["region"], e["country"]) for c, r in valid_locations)]
-        return dict(analysis_status="succeeded", analysis_error=None, summary=summary, updates=updates, events=suggested_events)
+                            if any(matches_location(c, r, e["region"], e["country"]) for c,r in valid_locations)]
+        updates, suggested_events, audit = gate_by_evidence(updates, suggested_events, evidence)
+        result["raw_summary"] = summary
+        if audit:
+            summary = "證據檢核後的風險摘要：\n" + "\n".join([f"- {u['display_name']}: {u['risk_pct']}%" for u in updates] + [f"- {e['country']} {e['region']}: {e['event_type']}，{e['impact_days']} 天" for e in suggested_events])
+            if not updates and not suggested_events:
+                summary += "沒有可套用的有效建議。"
+        result.update({"summary": summary, "updates": updates, "events": suggested_events, "audit": audit,
+                       # 模型可能想 1～2 分鐘，「產生時間」以回覆完成為準
+                       "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
     except Exception:
-        return dict(analysis_status="failed", analysis_error="invalid_output_or_provider_error", summary="AI 摘要解析失敗：請稍後重試。", updates=[], events=[])
+        result.update(summary="AI 摘要解析失敗：請稍後重試。", error=True, analysis_status="failed", analysis_error="invalid_output_or_provider_error", updates=[], events=[])
+        return result
+
+    if persist and actor:
+        result["summary_id"] = save_ai_risk_summary(result, actor=actor)
+    return result
 
 
 def resolve_heatmap_updates(updates, heatmap_rows):
@@ -439,7 +609,7 @@ def build_heatmap_review_rows(updates, events, heatmap_rows):
     return rows
 
 
-def apply_heatmap_updates(updates, ai_summary=None, *, actor=None):
+def apply_heatmap_updates(updates, ai_summary=None, *, actor=None, summary_result=None):
     """Atomically persist the exact reviewed risk AND delay per node."""
     require_capability(actor, RISK_WORKSPACE_WRITE)
     rows = resolve_heatmap_updates(updates or [], get_risk_heatmap_data())
@@ -453,6 +623,8 @@ def apply_heatmap_updates(updates, ai_summary=None, *, actor=None):
                 updated_at=excluded.updated_at,estimated_delay=excluded.estimated_delay""",
                 (row["region_key"],row["display_name"],row["latitude"],row["longitude"],
                  row["risk_pct"],(ai_summary or "")[:500],now,row.get("estimated_delay")))
+        if summary_result is not None:
+            save_ai_risk_summary(summary_result, actor=actor, conn=conn)
     return len(rows)
 
 
@@ -495,6 +667,40 @@ def generate_communication_draft(api_key: str = "", context: str = "", target_ty
         return f"AI 草稿生成失敗：{e}"
 
 
+
+
+def get_region_exposure(region_key) -> dict:
+    """單一據點的曝險資訊：未結採購單金額／張數 + 該區供應商數。
+
+    「曝險金額」只算 status 不在 (已完成, 已取消) 的採購單；沒有採購單時金額為 0，
+    前端應改顯示供應商家數而不是誤導的 $0。
+    """
+    conn = connect_db(DB_FILE)
+    try:
+        country, region = split_location(region_key)
+        where_sub, params_sub = _get_expanded_region_where(region, country, prefix="s.")
+        supplier_where = " AND ".join(where_sub) or "1=1"
+        sup_row = conn.execute(
+            f"""SELECT COUNT(*), COALESCE(SUM(CASE WHEN s.is_official=1 THEN 1 ELSE 0 END), 0)
+                FROM suppliers s WHERE {supplier_where}""",
+            tuple(params_sub),
+        ).fetchone()
+        po_row = conn.execute(
+            f"""SELECT COUNT(p.po_id), COALESCE(SUM(p.total_amount), 0)
+                FROM purchase_orders p
+                JOIN suppliers s ON p.supplier_id = s.supplier_id
+                WHERE (p.status IS NULL OR p.status NOT IN ('已完成','已取消'))
+                  AND {supplier_where}""",
+            tuple(params_sub),
+        ).fetchone()
+    finally:
+        conn.close()
+    return {
+        "supplier_count": int(sup_row[0] or 0),
+        "official_supplier_count": int(sup_row[1] or 0),
+        "open_po_count": int(po_row[0] or 0),
+        "open_po_amount": float(po_row[1] or 0),
+    }
 
 
 def get_total_impact_amount(region_key):
@@ -577,7 +783,7 @@ def get_impacted_pos(region_key=None, country=None, supplier_id=None):
         params.extend(params_sub)
     q = """
     SELECT p.po_id, p.supplier_id, s.name as supplier_name, s.country, s.region,
-           p.estimated_delay_days, p.alternative_suggestion
+           p.estimated_delay_days, p.alternative_suggestion, p.total_amount, p.status
     FROM purchase_orders p
     JOIN suppliers s ON p.supplier_id = s.supplier_id
     WHERE """ + " AND ".join(where)
@@ -616,27 +822,32 @@ def get_impacted_pos(region_key=None, country=None, supplier_id=None):
         alt = str(alt_raw).strip() if (_pd.notna(alt_raw) and alt_raw) else "—"
         out.append({
             "po_id": row["po_id"],
+            "supplier_id": row["supplier_id"],
             "supplier_name": row["supplier_name"],
+            "country": _clean_text(row.get("country")),
+            "region": _clean_text(row.get("region")),
             "key_materials": key_materials,
             "estimated_delay": delay_str,
+            "estimated_delay_days": int(delay) if (delay is not None and delay == delay) else None,
             "alternative_suggestion": alt,
+            "alternative_suggestion_raw": alt if alt != "—" else "",
+            "total_amount": float(row.get("total_amount") or 0) if row.get("total_amount") == row.get("total_amount") else 0.0,
+            "status": _clean_text(row.get("status")),
         })
     conn.close()
     return out
 
 
-def update_po_impact(
-    po_id, estimated_delay_days=None, alternative_suggestion=None, *, actor=None
-):
-    """更新採購單的預計延遲天數與替代建議。"""
-    require_capability(actor, ERP_POLICY_WRITE)
-    conn = connect_db(DB_FILE)
-    if estimated_delay_days is not None:
-        conn.execute("UPDATE purchase_orders SET estimated_delay_days = ? WHERE po_id = ?", (estimated_delay_days, po_id))
-    if alternative_suggestion is not None:
-        conn.execute("UPDATE purchase_orders SET alternative_suggestion = ? WHERE po_id = ?", (alternative_suggestion, po_id))
-    conn.commit()
-    conn.close()
+def update_po_impact(po_id, estimated_delay_days=None, alternative_suggestion=None, *, actor=None):
+    """Planner may change assessment notes, never the underlying transaction."""
+    require_capability(actor, RISK_WORKSPACE_WRITE)
+    days = number(estimated_delay_days, maximum=365, integer=True) if estimated_delay_days is not None else None
+    suggestion = text(alternative_suggestion) if alternative_suggestion is not None else None
+    with connect_db(DB_FILE) as conn:
+        if days is not None:
+            conn.execute("UPDATE purchase_orders SET estimated_delay_days=? WHERE po_id=?", (days,po_id))
+        if suggestion is not None:
+            conn.execute("UPDATE purchase_orders SET alternative_suggestion=? WHERE po_id=?", (suggestion,po_id))
 
 
 def get_ai_alternative_suggestions(api_key="", impacted_list=None, hotspot_name="", model: str | None = None):
@@ -764,7 +975,7 @@ def get_risk_events_list(limit=20):
     """取得風險事件列表（id, event_type, region, country, impact_days, description, created_at）。"""
     conn = connect_db(DB_FILE)
     df = __pd_read(
-        f"SELECT id, event_type, region, country, impact_days, description, created_at, news_id FROM supply_chain_events WHERE {_VALID_EVENT_SOURCE} ORDER BY id DESC LIMIT ?",
+        f"SELECT id, event_type, region, country, impact_days, description, created_at, news_id FROM supply_chain_events WHERE {_VALID_EVENT_SOURCE} ORDER BY COALESCE(created_at,'') DESC,id DESC LIMIT ?",
         conn,
         params=(limit,),
     )
@@ -824,48 +1035,35 @@ def get_historical_event_precedents():
         conn.close()
 
 
-def add_risk_event(
-    event_type, region, country, impact_days, description, news_id=None, *, actor=None
-):
-    """新增或更新風險事件（如果該區域已存在事件則覆蓋）。"""
+def add_risk_event(event_type, region, country, impact_days, description, news_id=None, *, actor=None):
+    from .risk_contract import validate_event
     require_capability(actor, RISK_WORKSPACE_WRITE)
-    impact_days = number(impact_days, maximum=365, integer=True)
-    conn = connect_db(DB_FILE)
-    c = conn.cursor()
-    if news_id is not None:
-        source = c.execute("SELECT analysis_status,is_relevant,estimated_delay FROM supply_chain_news WHERE id=?", (news_id,)).fetchone()
-        if not source or source[0] != "succeeded" or source[1] != 1 or source[2] is None:
-            conn.close()
-            raise ValueError("新聞分析尚未成功或延遲未知，無法登錄風險")
+    with connect_db(DB_FILE) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        event_type, region, country, impact_days, description, news_id = validate_event(conn, event_type, region, country, impact_days, description, news_id)
+        row = conn.execute("SELECT id FROM supply_chain_events WHERE COALESCE(country,'')=? AND COALESCE(region,'')=? AND event_type=? AND news_id IS ?", (country, region, event_type, news_id)).fetchone()
+        if row:
+            conn.execute("UPDATE supply_chain_events SET impact_days=?, description=?, created_at=? WHERE id=?", (impact_days, description, datetime.now().isoformat(), row[0]))
+            return row[0]
+        cur = conn.execute("INSERT INTO supply_chain_events(event_type,region,country,impact_days,description,created_at,news_id) VALUES(?,?,?,?,?,?,?)", (event_type,region,country,impact_days,description,datetime.now().isoformat(),news_id))
+        return cur.lastrowid
 
-    # 核心優化：直接覆寫同區域的正式事件 (news_id 為空者)
-    c.execute(
-        """SELECT id FROM supply_chain_events 
-           WHERE COALESCE(country, '') = ? AND COALESCE(region, '') = ? AND news_id IS ?""",
-        (country or "", region or "", news_id)
-    )
-    existing = c.fetchone()
-    
-    if existing:
-        event_id = existing[0]
-        c.execute(
-            """UPDATE supply_chain_events 
-               SET event_type=?, impact_days=?, description=?, created_at=?
-               WHERE id=?""",
-            (event_type, impact_days, description or None, datetime.now().strftime("%Y-%m-%d %H:%M"), event_id)
-        )
-        conn.commit()
-        conn.close()
-        return event_id
-    else:
-        c.execute(
-            "INSERT INTO supply_chain_events (event_type, region, country, impact_days, description, created_at, news_id) VALUES (?,?,?,?,?,?,?)",
-            (event_type, region or None, country or None, impact_days, description or None, datetime.now().strftime("%Y-%m-%d %H:%M"), news_id)
-        )
-        new_id = c.lastrowid
-        conn.commit()
-        conn.close()
-        return new_id
+
+def update_risk_event(event_id, *, event_type=None, impact_days=None, description=None, actor=None):
+    from .risk_contract import validate_event
+    require_capability(actor, RISK_WORKSPACE_WRITE)
+    event_id = number(event_id, maximum=2**53-1, integer=True)
+    with connect_db(DB_FILE) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT event_type,region,country,impact_days,description,news_id FROM supply_chain_events WHERE id=?", (event_id,)).fetchone()
+        if not row:
+            return False
+        values = validate_event(conn, row[0] if event_type is None else event_type, row[1] or '', row[2] or '', row[3] if impact_days is None else impact_days, (row[4] or '') if description is None else description, row[5])
+        collision = conn.execute("SELECT id FROM supply_chain_events WHERE COALESCE(country,'')=? AND COALESCE(region,'')=? AND event_type=? AND news_id IS ? AND id<>?", (values[2],values[1],values[0],values[5],event_id)).fetchone()
+        if collision:
+            raise ValueError("另一事件已使用相同類型與來源；請更新該事件")
+        conn.execute("UPDATE supply_chain_events SET event_type=?,impact_days=?,description=?,created_at=? WHERE id=?", (values[0],values[3],values[4],datetime.now().isoformat(),event_id))
+        return True
 
 
 def delete_risk_event(event_id, *, actor=None):
@@ -1392,3 +1590,50 @@ def __empty_df():
 def __pd_concat(a, b):
     import pandas as pd
     return pd.concat([a, b], ignore_index=True)
+
+
+def events_for_location(country: str, region: str, events=None) -> list[dict]:
+    """某據點命中的事件（含新聞登錄與人工登錄），依延遲天數→登錄時間新到舊排序。
+
+    前端卡片用它判斷「已有情報／已有應變計畫」，避免每張卡各自重查資料庫。
+    """
+    if events is None:
+        events = get_active_risk_events(limit=HEATMAP_EVENT_LOOKBACK)
+    if events is None:
+        rows = []
+    elif hasattr(events, "iterrows"):
+        rows = [r.to_dict() for _, r in events.iterrows()]
+    else:
+        rows = list(events)
+    matched = [ev for ev in rows if _event_matches_location(ev, country or "", region or "")]
+
+    def _days(ev):
+        try:
+            return int(ev.get("impact_days") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    matched.sort(key=lambda ev: (_days(ev), str(ev.get("created_at") or "")), reverse=True)
+    return matched
+
+
+def is_news_event(ev: dict) -> bool:
+    """news_id 非空 → 由新聞一鍵登錄；否則為人工／AI 建議建立的正式應變事件。"""
+    news_id = ev.get("news_id")
+    if news_id is None:
+        return False
+    try:
+        return not pd.isna(news_id)
+    except (TypeError, ValueError):
+        return True
+
+
+def get_heatmap_ai_summary(api_key="", news_context="", reference_date=None, model=None, *, news_items=None, actor=None):
+    """Compatibility tuple for existing callers; structured status is available below."""
+    result = get_heatmap_ai_analysis(api_key, news_context, reference_date, model, news_items=news_items, actor=actor)
+    return result["summary"], result["updates"], result["events"]
+
+
+
+def get_heatmap_ai_analysis(api_key="", news_context="", reference_date=None, model=None, *, news_items=None, actor=None, persist=True):
+    return analyze_heatmap_risk(news_items, news_context=news_context, reference_date=reference_date, actor=actor, persist=persist)

@@ -244,6 +244,7 @@ def test_legacy_unverified_source_events_are_not_risk_inputs(risk_db):
 
 def test_heatmap_invalid_numeric_output_is_explicit_failure(risk_db,monkeypatch):
     monkeypatch.setattr("backend.llm_client.complete_text",lambda *a,**k:'{"摘要":"bad","更新":[{"地區":"台灣","風險":101}],"事件":[]}')
+    risk.add_risk_event("交通", "聖保羅", "巴西", 0, "zero evidence", actor="planner")
     result = risk.get_heatmap_ai_analysis(news_context="fixture")
     assert result["analysis_status"] == "failed"
     assert result["updates"] == [] and result["events"] == []
@@ -253,6 +254,7 @@ def test_exact_nodes_outside_country_dictionary_can_be_reviewed_and_saved(risk_d
     with sqlite3.connect(risk_db) as conn:
         conn.execute("INSERT INTO suppliers(supplier_id,name,country,region,is_official,latitude,longitude) VALUES ('BR','BR','巴西','聖保羅',1,-23,-46)")
     monkeypatch.setattr("backend.llm_client.complete_text",lambda *a,**k:'{"摘要":"test","更新":[{"地區":"巴西","風險":0}],"事件":[{"類型":"交通","國家":"巴西","地區":"聖保羅","延遲天數":0,"描述":"test"}]}')
+    risk.add_risk_event("交通", "聖保羅", "巴西", 0, "zero evidence", actor="planner")
     result = risk.get_heatmap_ai_analysis(news_context="fixture")
     assert result["updates"] == [{"display_name":"巴西 聖保羅","risk_pct":0}]
     assert len(result["events"]) == 1

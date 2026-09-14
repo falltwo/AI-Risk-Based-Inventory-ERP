@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT))
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed-only", action="store_true")
+    parser.add_argument("--integration-demo", action="store_true", help="Seed deterministic local PO and supplier offers for L1/L2/L3 review")
     parser.add_argument("--scheduler-once", metavar="KEY")
     parser.add_argument("--port", type=int, default=8511)
     parser.add_argument("--scenario", choices=("mixed", "success"), default="mixed")
@@ -42,7 +43,7 @@ def main():
     for key in ("OPENAI_API_KEY", "GEMINI_API_KEY", "GNEWS_API_KEY", "LINE_CHANNEL_ACCESS_TOKEN", "LINE_CHANNEL_SECRET", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
         os.environ.pop(key, None)
     os.environ["ERP_ISOLATED_SCENARIO"] = args.scenario
-    os.environ.update(ERP_DB_PATH=str(db_path), ERP_DEMO_MODE="1", ERP_ISOLATED_TEST="1",
+    os.environ.update(ERP_DB_PATH=str(db_path), ERP_DEMO_MODE="1", ERP_ENABLE_DEMO_SEED="0", ERP_ISOLATED_TEST="1",
                       ERP_SCHEDULER_ENABLED="0", ERP_SCHEDULER_ACTOR="planner",
                       STREAMLIT_BROWSER_GATHER_USAGE_STATS="false", LITELLM_LOCAL_MODEL_COST_MAP="True",
                       OTEL_SDK_DISABLED="true")
@@ -57,6 +58,8 @@ def main():
             print("Real news snapshot loaded; analysis remains mocked; acceptance evidence is preserved.")
         else:
             seed_preview_suppliers(conn)
+            if args.integration_demo:
+                seed_integration_demo(conn)
     print(f"ISOLATED ERP_DB_PATH={db_path}")
     print("News replay/LLM fixtures; external network blocked; background scheduler disabled.")
     if args.scheduler_once:
@@ -75,6 +78,18 @@ def seed_preview_suppliers(conn):
     conn.execute("UPDATE suppliers SET is_official=0 WHERE supplier_id NOT LIKE 'BATCH1-%'")
     for sid, country, region, lat, lon in (("BATCH1-TWN","台灣","北區",25.03,121.56),("BATCH1-TWS","台灣","南區",22.63,120.30),("BATCH1-JP","日本","東京",35.68,139.69)):
         conn.execute("INSERT OR IGNORE INTO suppliers(supplier_id,name,country,region,latitude,longitude,is_official) VALUES (?,?,?,?,?,?,1)", (sid,f"測試供應商 {country} {region}",country,region,lat,lon))
+        conn.execute("UPDATE suppliers SET is_official=1 WHERE supplier_id=?", (sid,))
+
+
+def seed_integration_demo(conn):
+    """Only invoked by the network-blocked launcher in this worktree's DB."""
+    conn.execute("INSERT OR IGNORE INTO inventory(product_id,name,stock,price,cost,reorder_point) VALUES('INTEGRATION-ITEM','整合驗收物料',100,120,100,20)")
+    for sid, price in (("BATCH1-JP",100),("BATCH1-TWN",110),("BATCH1-TWS",115)):
+        if not conn.execute("SELECT 1 FROM supplier_products WHERE supplier_id=? AND product_id='INTEGRATION-ITEM'",(sid,)).fetchone():
+            conn.execute("INSERT INTO supplier_products(supplier_id,product_id,price,carbon_factor) VALUES(?,'INTEGRATION-ITEM',?,1)",(sid,price))
+    conn.execute("INSERT OR IGNORE INTO purchase_orders(po_id,supplier_id,order_date,status,total_amount,note) VALUES('INTEGRATION-PO-JP','BATCH1-JP',date('now'),'已下單',1000,'固定隔離驗收資料')")
+    if not conn.execute("SELECT 1 FROM purchase_order_items WHERE po_id='INTEGRATION-PO-JP'").fetchone():
+        conn.execute("INSERT INTO purchase_order_items(po_id,product_id,qty,unit_price) VALUES('INTEGRATION-PO-JP','INTEGRATION-ITEM',10,100)")
 
 if __name__ == "__main__":
     raise SystemExit(main())

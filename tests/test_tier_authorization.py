@@ -16,6 +16,7 @@ from backend.access_control import (
     ERP_EXCHANGE_RECONCILE,
     PROPOSAL_EVIDENCE_READ,
     RISK_ANALYSIS_READ,
+    RISK_ALERT_ACK,
     RISK_OVERVIEW_READ,
     RISK_WHAT_IF_RUN,
     capabilities_for_role,
@@ -116,7 +117,8 @@ def test_demo_roles_have_context_visibility_without_inheriting_actions():
     planner = capabilities_for_role("supply_planner")
     approver = capabilities_for_role("procurement_approver")
 
-    assert viewer == {RISK_OVERVIEW_READ}
+    # L1 告警確認是監控狀態、不是 ERP 寫入，viewer 仍無任何 L2/L3 能力
+    assert viewer == {RISK_OVERVIEW_READ, RISK_ALERT_ACK}
 
     assert {RISK_OVERVIEW_READ, RISK_ANALYSIS_READ, RISK_WHAT_IF_RUN} <= planner
     assert ERP_EXCHANGE_PROPOSE in planner

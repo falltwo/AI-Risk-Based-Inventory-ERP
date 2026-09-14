@@ -24,6 +24,7 @@ def test_streamlit_generate_apply_and_new_session_reload(tmp_path, monkeypatch):
     script = "from frontend.components.supply_map import render_supply_chain_map\nrender_supply_chain_map('', '', actor='planner')"
     at = AppTest.from_string(script, default_timeout=20).run()
     assert not at.exception
+    risk.add_risk_event("交通", "北區", "台灣", 0, "zero evidence", actor="planner")
     at.button(key="heatmap_ai_btn").click().run()
     assert not at.exception
     assert not at.button(key="apply_ai_risk_btn").disabled

@@ -72,34 +72,12 @@ def create_order(product_id: str, quantity: int) -> str:
         return f"建立訂單時發生資料庫錯誤：{e}"
 
 
-def cancel_order(product_id: str, quantity: int, customer_id: str = "") -> str:
-    """
-    取消最近一筆符合條件的訂單，並回補庫存。
-    需 admin 權限。
-    若提供 customer_id 則只比對該客戶的訂單，避免誤刪他客戶同品項同數量訂單。
-    """
-    if not check_permission(["admin"]):
-        return "權限不足：只有『管理員』可以取消訂單。"
-
-    if customer_id:
-        rows = run_query(
-            "SELECT order_id FROM orders WHERE (customer_id = ? OR customer_id IS NULL) AND product_id = ? AND quantity = ? ORDER BY order_date DESC LIMIT 1",
-            (customer_id, product_id, quantity),
-        )
-    else:
-        rows = run_query(
-            "SELECT order_id FROM orders WHERE product_id = ? AND quantity = ? ORDER BY order_date DESC LIMIT 1",
-            (product_id, quantity),
-        )
-
-    if not rows:
-        return f"找不到產品 {product_id} 數量 {quantity} 的待取消訂單。"
-
-    order_id = rows[0][0]
-    run_query("DELETE FROM orders WHERE order_id = ?", (order_id,), fetch=False)
-    from backend.inventory import update_inventory
-    update_inventory(product_id=product_id, quantity_change=quantity)
-    return f"✅ 已取消訂單 {order_id}，並將產品 {product_id} 庫存回補 {quantity} 件。"
+def cancel_order(product_id: str, quantity: int, customer_id: str = "", *, approval_id=None, actor=None):
+    """Compensation must resolve its original parameters from a durable approval."""
+    if not approval_id:
+        raise ValueError("沖銷需要原始 approval_id 與管理員身份")
+    from .approval_reversal import reverse_approval
+    return reverse_approval(approval_id, actor=actor)["message"]
 
 
 def get_receivables() -> str:

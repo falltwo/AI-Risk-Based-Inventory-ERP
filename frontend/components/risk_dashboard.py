@@ -1,6 +1,7 @@
 from backend.region_matching import matches_location, split_location
 import os
 import streamlit as st
+from frontend.ui_utils import show_error
 import re
 import pandas as pd
 from backend.access_control import ERP_POLICY_WRITE, has_capability
@@ -49,6 +50,31 @@ def _auto_refresh_heatmap_ai(api_key, gemini_model):
     st.session_state["suggested_events"] = evs
     if "heatmap_needs_refresh" in st.session_state:
         del st.session_state["heatmap_needs_refresh"]
+def _render_l1_handoff_notices(*, actor: str) -> None:
+    """L1 勾「通知 L2」的待確認情報；登錄成事件後自動消失（唯讀提示）。"""
+    from backend.l1_monitoring import list_l1_notifications_for_l2
+
+    try:
+        notices = list_l1_notifications_for_l2(actor=actor)
+    except PermissionError:
+        return
+    except Exception as exc:
+        show_error("L1 通知讀取失敗", exc)
+        return
+    if not notices:
+        return
+    with st.container(border=True):
+        st.markdown(f"**📨 L1 轉來 {len(notices)} 則待確認情報**（在下方「當前全球情報分析」選取後一鍵登錄即可結案）")
+        for n in notices[:8]:
+            location = " ".join(part for part in (n["country"], n["region"]) if part) or "未填地區"
+            line = (f"- 【{n['event_type']}｜預估 {n['impact_days']} 天】{n['title'] or '（無標題）'} — {location}"
+                    f"｜{n['notified_by'] or 'L1'} 於 {n['notified_at'] or '—'} 通知")
+            if n.get("note"):
+                line += f"｜備註：{n['note']}"
+            st.markdown(line)
+        if len(notices) > 8:
+            st.caption(f"…另有 {len(notices) - 8} 則")
+
 
 def render_intelligence_gathering(
     api_key: str = "",
@@ -63,6 +89,7 @@ def render_intelligence_gathering(
     """
     st.subheader("🔍 即時全球情報與事件登錄")
     st.caption("透過 GNews/RSS 抓取全球供應鏈相關新聞，並利用 AI 自動偵測受影響國家、地區與事件類型（戰爭、氣候、罷工等）。")
+    _render_l1_handoff_notices(actor=actor)
 
     from backend.isolated_runtime import news_capture
     capture = news_capture() if os.getenv("ERP_ISOLATED_TEST") == "1" else None
@@ -274,6 +301,109 @@ def render_intelligence_gathering(
                 st.success("手動事件已登錄！記得至地圖區更新 AI 摘要。")
                 st.rerun()
 
+def _render_impacted_po_marking(*, active_ev_id: int, region: str, country: str, impact_days: int, actor: str) -> None:
+    """受影響採購單標記：情報 → 事件 → 【這裡】→ 步驟 5 提案 → L3 核准。
+
+    步驟 5 只列「已標上預估延遲或替代建議」的採購單；原本沒有任何畫面會寫這兩欄，
+    所以整條鏈在這裡斷掉。這裡用事件地區找出未結採購單，AI 建議延遲／替代來源，
+    使用者審核後寫回（RISK_WORKSPACE_WRITE，不動採購單本體）。
+    """
+    from backend.supply_chain_risk import (
+        get_ai_alternative_suggestions,
+        get_impacted_pos,
+        update_po_impact,
+    )
+
+    with st.expander("🧾 0. 受影響採購單標記 → 送交步驟 5 提案 (Mark Impacted POs)", expanded=True):
+        try:
+            impacted = get_impacted_pos(region_key=region or None, country=country or None)
+        except Exception as exc:
+            show_error("受影響採購單讀取失敗", exc)
+            return
+        if not impacted:
+            st.info("此事件地區的供應商目前沒有未結採購單，步驟 5 不會有可提案項目。")
+            return
+
+        marked = [x for x in impacted if x.get("estimated_delay_days") is not None or x.get("alternative_suggestion_raw")]
+        total_amount = sum(x.get("total_amount") or 0 for x in impacted)
+        st.caption(
+            f"事件地區命中 **{len(impacted)}** 張未結採購單（合計 ${total_amount:,.0f}），"
+            f"其中 **{len(marked)}** 張已標記。標記後會出現在下方「步驟 5」供建立替代採購提案。"
+        )
+
+        hotspot = " ".join(part for part in (country, region) if part) or "受災地區"
+        ai_key = f"po_ai_suggest_{active_ev_id}"
+        col_ai, col_hint = st.columns([1, 2])
+        with col_ai:
+            if st.button("🤖 AI 評估延遲與替代來源", key=f"po_ai_btn_{active_ev_id}", use_container_width=True):
+                with st.spinner("AI 正在依熱點、供應商與物料庫存評估每張採購單..."):
+                    suggestions = get_ai_alternative_suggestions(impacted_list=impacted, hotspot_name=hotspot)
+                if suggestions:
+                    st.session_state[ai_key] = {x["po_id"]: x for x in suggestions}
+                    st.toast(f"AI 已為 {len(suggestions)} 張採購單提出建議", icon="🤖")
+                else:
+                    st.session_state.pop(ai_key, None)
+                    st.warning("AI 未回傳可用建議；你仍可手動填延遲天數與替代建議後標記。")
+                st.rerun()
+        with col_hint:
+            st.caption("沒按 AI 也能標：預設延遲＝事件預估天數，替代建議可留空。表格可直接修改。")
+
+        ai_suggestions = st.session_state.get(ai_key, {})
+        table_rows = []
+        for x in impacted:
+            sug = ai_suggestions.get(x["po_id"], {})
+            default_days = sug.get("estimated_delay_days") or x.get("estimated_delay_days") or impact_days
+            default_alt = sug.get("alternative_suggestion") or x.get("alternative_suggestion_raw") or ""
+            table_rows.append({
+                "標記": True,
+                "採購單": x["po_id"],
+                "供應商": x["supplier_name"],
+                "關鍵物料": x["key_materials"],
+                "金額": float(x.get("total_amount") or 0),
+                "目前": x["estimated_delay"],
+                "預估延遲 (天)": int(default_days),
+                "替代建議": default_alt,
+            })
+        edited = st.data_editor(
+            pd.DataFrame(table_rows),
+            column_config={
+                "標記": st.column_config.CheckboxColumn("標記", default=True),
+                "採購單": st.column_config.TextColumn("採購單", disabled=True),
+                "供應商": st.column_config.TextColumn("供應商", disabled=True),
+                "關鍵物料": st.column_config.TextColumn("關鍵物料（庫存）", disabled=True),
+                "金額": st.column_config.NumberColumn("金額", format="$%d", disabled=True),
+                "目前": st.column_config.TextColumn("目前延遲", disabled=True),
+                "預估延遲 (天)": st.column_config.NumberColumn("預估延遲 (天)", min_value=0, max_value=365, step=1),
+                "替代建議": st.column_config.TextColumn("替代建議（從哪裡調貨）", width="large"),
+            },
+            hide_index=True,
+            use_container_width=True,
+            key=f"po_mark_editor_{active_ev_id}",
+        )
+        selected = edited[edited["標記"] == True]
+        if st.button(
+            f"📌 標記 {len(selected)} 張為受影響採購單（寫入延遲與建議）",
+            key=f"po_mark_btn_{active_ev_id}", type="primary", disabled=len(selected) == 0,
+        ):
+            try:
+                for _, row in selected.iterrows():
+                    update_po_impact(
+                        row["採購單"],
+                        estimated_delay_days=int(row["預估延遲 (天)"]),
+                        alternative_suggestion=(str(row["替代建議"]).strip() or None),
+                        actor=actor,
+                    )
+            except PermissionError:
+                st.error("此帳號沒有標記受影響採購單的權限。")
+                return
+            except Exception as exc:
+                show_error("標記受影響採購單失敗", exc)
+                return
+            st.session_state.pop(ai_key, None)
+            st.toast(f"✅ 已標記 {len(selected)} 張採購單，步驟 5 可建立提案", icon="🧾")
+            st.rerun()
+
+
 def render_response_execution(
     api_key: str = "",
     gnews_api_key: str = "",
@@ -368,6 +498,11 @@ def render_response_execution(
         return mapping.get(etype, 1.0)
 
     # 執行與分析細節 (用摺疊式選單以省空間)
+    _render_impacted_po_marking(
+        active_ev_id=int(active_ev["id"]), region=region, country=country,
+        impact_days=impact_days, actor=actor,
+    )
+
     with st.expander("🚚 1. 斷鏈庫存預警與應變 (Increase Safety Stock)", expanded=True):
         if stock_alerts:
             etype = active_ev.get('event_type', '其他')

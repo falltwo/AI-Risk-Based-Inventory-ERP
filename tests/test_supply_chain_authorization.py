@@ -98,7 +98,7 @@ def _mutation(name: str, actor: str | None):
     factor_id = risk.get_risk_factors().iloc[0]["id"]
     operations = {
         "add_event": lambda: risk.add_risk_event(
-            "strike", "Kaohsiung", "Taiwan", 7, "new", actor=actor
+            "罷工", "Kaohsiung", "Taiwan", 7, "new", actor=actor
         ),
         "delete_event": lambda: risk.delete_risk_event(event_id, actor=actor),
         "upsert_heatmap": lambda: risk.upsert_risk_heatmap(
@@ -138,10 +138,11 @@ _WORKSPACE_MUTATIONS = (
     "delete_factor",
     "clear_factors",
     "load_presets",
+    # 採購單延遲／替代建議是給 L3 看的評估註記，不動採購單本體 → L2 workspace
+    "update_po_impact",
 )
 
 _ERP_POLICY_MUTATIONS = (
-    "update_po_impact",
     "increase_stock",
     "restore_stock",
     "update_rop",

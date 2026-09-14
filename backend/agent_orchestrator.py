@@ -55,6 +55,42 @@ _FALLBACK_MODELS = [
 ]
 
 
+# ── 額外 HTTP header（選填，JSON 物件）：部分 OpenAI 相容端點要求自報身分 ──
+#   例：OpenCode Go 每個請求都要帶 x-opencode-session，否則回 MissingSessionID。
+#   格式錯誤時視為未設定（啟動時印警告），不讓 .env 打錯字把整個 LLM 層拖垮。
+def _load_extra_headers() -> dict[str, str]:
+    raw = os.getenv("LLM_EXTRA_HEADERS", "").strip()
+    if not raw:
+        return {}
+    try:
+        headers = json.loads(raw)
+        if not isinstance(headers, dict):
+            raise ValueError("must be a JSON object")
+        return {str(k): str(v) for k, v in headers.items()}
+    except ValueError as e:
+        print(f"[llm] ignoring LLM_EXTRA_HEADERS: {e}")
+        return {}
+
+
+_EXTRA_HEADERS = _load_extra_headers()
+
+
+# ── 單次請求逾時（秒）：上游卡住時及早放棄、讓 fallback 接手 ──────────────
+#   litellm 預設 600 秒；OpenCode 這類代理端點偶爾會吞掉請求不回應，
+#   現場等 10 分鐘不如 2 分鐘換一家。非法值視為預設。
+def _load_timeout(default: float = 120.0) -> float:
+    raw = os.getenv("LLM_TIMEOUT", "").strip()
+    try:
+        value = float(raw) if raw else default
+    except ValueError:
+        print(f"[llm] ignoring LLM_TIMEOUT={raw!r}: not a number")
+        return default
+    return value if value > 0 else default
+
+
+_LLM_TIMEOUT = _load_timeout()
+
+
 # ════════════════════════════════════════════════════════════════════════
 # 0) 各 Agent 的 system prompt（由 registry 組出，DRY + 單一真實來源）
 # ════════════════════════════════════════════════════════════════════════
@@ -206,7 +242,7 @@ def _llm(messages, model=None, tools=None, temperature=0.2, json_mode=False,
         from .isolated_runtime import fixture_completion
         msg = SimpleNamespace(content=fixture_completion(messages, usage_tag), tool_calls=None)
         return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
-    kw = {"messages": messages, "temperature": temperature}
+    kw = {"messages": messages, "temperature": temperature, "timeout": _LLM_TIMEOUT}
     if tools:
         kw["tools"] = tools
         kw["tool_choice"] = "auto"
@@ -216,6 +252,8 @@ def _llm(messages, model=None, tools=None, temperature=0.2, json_mode=False,
         kw["api_key"] = api_key
     if api_base:
         kw["api_base"] = api_base
+    if _EXTRA_HEADERS:
+        kw["extra_headers"] = dict(_EXTRA_HEADERS)
 
     explicit = bool(model or api_key or api_base)
     chain = [model or DEFAULT_MODEL]

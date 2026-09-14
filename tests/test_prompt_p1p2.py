@@ -97,6 +97,7 @@ def test_heatmap_flow_end_to_end(monkeypatch, tmp_path):
                         '"事件": [{"類型": "政策", "地區": "台灣", "國家": "台灣", '
                         '"延遲天數": 12, "描述": "出口管制"}]}')
     from backend.supply_chain_risk import get_heatmap_ai_summary
+    supply_chain_risk.add_risk_event("政策", "", "台灣", 12, "政策依據", actor="planner")
     summary, updates, events = get_heatmap_ai_summary(news_context="測試新聞")
 
     assert "台灣風險升高" in summary

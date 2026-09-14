@@ -307,13 +307,14 @@ def _refresh(countries, gnews_api_key, max_per_country, within_days, actor):
         result["heatmap_status"] = "no_valid_news"
         if eligible:
             context = "\n".join(f"{n['title']} {n.get('analysis_summary') or ''} [delay={n.get('estimated_delay')}]" for n in eligible)
-            heatmap = get_heatmap_ai_analysis(news_context=context, reference_date=datetime.now().strftime("%Y-%m-%d"))
+            heatmap = get_heatmap_ai_analysis(news_context=context, news_items=eligible, actor=actor,
+                                            persist=False, reference_date=datetime.now().strftime("%Y-%m-%d"))
             summary, updates, events = heatmap["summary"], heatmap["updates"], heatmap["events"]
             if heatmap["analysis_status"] != "succeeded":
                 result["heatmap_status"] = "failed"
                 result["status"] = "partial_failure"
             else:
                 review = build_heatmap_review_rows(updates, events, get_risk_heatmap_data())
-                apply_heatmap_updates([dict(display_name=r["地區"],risk_pct=r["預估風險 (%)"],estimated_delay=r["預估延遲 (天)"]) for r in review], summary, actor=actor)
+                apply_heatmap_updates([dict(display_name=r["地區"],risk_pct=r["預估風險 (%)"],estimated_delay=r["預估延遲 (天)"]) for r in review], summary, actor=actor, summary_result=heatmap)
                 result["heatmap_status"] = "succeeded"
     return result
