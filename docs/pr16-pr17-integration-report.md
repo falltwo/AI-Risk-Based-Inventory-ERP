@@ -8,7 +8,9 @@ PR #17 基準：`0bc642f9468a50567eb4f765534236cee155e8af`
 
 ## 做了什麼
 
-這次以 #16 的新聞資料、分析狀態、去重、排程、地區規則及熱圖保存為底，再把 #17 的 L1、L2、L3 功能搬入同一個 worktree。沒有整份採用任一 PR，也沒有改主工作區、推送遠端、更新 PR、部署或啟動正式服務。
+這次以 #16 的新聞資料、分析狀態、去重、排程、地區規則及熱圖保存為底，再把 #17 的 L1、L2、L3 功能依資料流整合到獨立 worktree。主工作區及原始分支保留；本整合分支準備提交獨立 Draft PR，供組員審查、組長決定合併，未部署或啟動正式服務。
+
+本整合 PR 涵蓋 #16、#17，建議集中審查此分支，暫緩分別合併原 PR；待整合 PR 合併後，由維護者將原 PR 標記為已被涵蓋並關閉。審查期間若 main 或原 PR 更新，需重新核對新增差異及測試。
 
 ### #16 的規則保留
 
@@ -34,7 +36,7 @@ PR #17 基準：`0bc642f9468a50567eb4f765534236cee155e8af`
 
 ### 分析與來源
 
-新增 `backend/risk_contract.py` 統一新聞有效性與事件欄位驗證。L1、L2、L3 不再用原始新聞的國家、地區或摘要取代分析欄位；新聞來源若不是成功、相關且延遲已知，不能建立新聞事件，也不會出現在有效告警或摘要證據中。
+新增 `backend/risk_contract.py` 統一新聞有效性與事件欄位驗證。L1、L2、L3 不再用原始新聞的國家、地區或摘要取代分析欄位。成功且相關的新聞才可作為摘要證據；延遲未知仍保留為未知，不能建立新聞事件，L1 待確認風險告警另要求正延遲。
 
 ### 證據與摘要
 
@@ -54,13 +56,14 @@ PR #17 基準：`0bc642f9468a50567eb4f765534236cee155e8af`
 
 ### 沖銷
 
-新增 `backend/approval_reversal.py`。沖銷現在以 `BEGIN IMMEDIATE`、`approval_reversals` 唯一鍵、原始執行收據及同一交易保護訂單/庫存/異動紀錄/稽核寫入。同時請求只會有一筆有效沖銷；舊審批若沒有唯一執行收據會拒絕自動處理，交由人工對帳。Gateway 也不再接受未綁定審批的直接 `rollback_inventory`/`cancel_order`。
+新增 `backend/approval_reversal.py`。沖銷現在以 `BEGIN IMMEDIATE`、`approval_reversals` 唯一鍵、原始執行收據及同一交易保護訂單/庫存/異動紀錄/稽核寫入。同時請求只會有一筆有效沖銷；舊審批若沒有唯一執行收據會拒絕自動處理，交由人工對帳。Gateway 也不再接受未綁定審批的直接 `rollback_inventory`/`cancel_order`。提案審批由 approver 執行，沖銷另要求 admin 身分。
 
 ## 測試
 
 ### 已通過
 
-- 完整 pytest：**504 passed in 36.69s**。
+- 整合完成時完整 pytest：**504 passed in 36.69s**；送審前於程式版本 `933443c` 重新執行：**504 passed in 47.32s**。後續僅更新本報告。
+- 本機環境為 Windows／Python 3.12.3；GitHub Actions 使用 Ubuntu／Python 3.11，整合 PR 的 CI 結果須另行確認。
 - `pip check`：`No broken requirements found`。
 - `git diff --check`：通過。
 - 兩個 PR 的相關 L1/L2/L3、授權、排程、資料管線及 UI 測試均在同一份整合工作樹執行。
@@ -149,22 +152,20 @@ Integrate PR17 tiers with PR16 analysis, geography and persistence contracts
 ```powershell
 Set-Location 'C:\新EPR系統\ERP-pr16-pr17-isolated'
 git show --stat --oneline 2932e1a
-git diff 7538a410..2932e1a -- backend frontend tests scripts
+git diff 7538a410..HEAD -- backend frontend tests scripts
+git diff fcc2737..HEAD --stat
+git log --oneline fcc2737..HEAD
 git status --short
 ```
 
-第二個本機提交只包含本報告；沒有遠端提交或 PR 更新。
-
-第三個本機提交 `253c01d` 加入整合回歸測試及最後的嚴格事件來源/天數過濾。
-
-第四個本機提交 `3985a17` 只修正本報告中的完整提交清單。
-
-第五個本機提交 `6b0feb0` 只補充本機提交歷史說明；程式內容仍由第一個與第三個提交提供。
+程式變更集中於整合提交 `2932e1a` 與回歸修補 `253c01d`。其餘後續提交是報告與送審說明整理；完整提交清單以上述 `git log` 為準。整合提交保留 #16 與 #17 作為兩個 parent，原作者提交歷史保留。
 
 ## 剩餘問題與建議方向
 
-整合前必須由審查者確認：事件 identity 是否還需要「事件批次/episode」欄位、legacy 資料要採人工重審還是離線回補、以及組織權限資料在正式部署的初始 migration。這三項會影響資料治理，不應在未決定前自動修改既有資料。
+合併前需確認整合 PR 的 CI、組員的 L1 → L2 → L3 畫面驗收，以及正式資料庫隔離副本的升級與重複初始化。目前只驗證空庫及合成舊版測試資料庫，沒有使用正式資料。審查者也應確認接受 legacy 資料暫不列為有效分析、缺少執行收據的舊審批改採人工對帳等行為。
+
+事件是否需要額外「事件批次/episode」欄位及 legacy 自動回補可另案規劃；本次保留事件類型 identity，legacy 維持未驗證。正式部署前需核對現有組織權限初始化設定；本次沒有自動改動正式組織或授權資料。
 
 可留到下一階段的工作包括真實新聞供應商輪替、付費模型觀測與成本控管、外部通知傳送、更多瀏覽器端 UX、以及報表/效能優化。本次沒有開始這些功能。
 
-目前整合分支停在本機，主工作區與兩個原始 PR 分支都保留，等待你檢查提交及隔離畫面。
+此分支供 Draft PR 審查，是否轉為可合併及實際合併由組員與組長依驗收結果決定。主工作區與兩個原始 PR 分支保留；本次不啟用自動合併。
