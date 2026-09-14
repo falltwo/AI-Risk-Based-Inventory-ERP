@@ -12,7 +12,9 @@ def valid_news_sql(alias=""):
 def valid_event_sql(alias=""):
     if alias not in ("", "e."):
         raise ValueError("Unsupported event alias")
-    return f"({alias}news_id IS NULL OR {alias}news_id IN (SELECT id FROM supply_chain_news WHERE {valid_news_sql()} AND estimated_delay IS NOT NULL))"
+    return (f"(typeof({alias}impact_days) IN ('integer','real') AND {alias}impact_days BETWEEN 0 AND 365 "
+            f"AND CAST({alias}impact_days AS INTEGER)={alias}impact_days AND "
+            f"({alias}news_id IS NULL OR {alias}news_id IN (SELECT id FROM supply_chain_news WHERE {valid_news_sql()} AND estimated_delay IS NOT NULL)))")
 
 
 def analyzed_news(row):

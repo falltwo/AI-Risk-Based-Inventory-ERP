@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import sqlite3
 
 from backend import database
+from backend.risk_contract import valid_event_sql
 from backend.access_control import RISK_ALERT_ACK, RISK_ANALYSIS_READ, RISK_OVERVIEW_READ, require_capability
 
 
@@ -164,13 +165,13 @@ def _window_start(since_days: int, *, now: datetime | None = None) -> str:
 
 def _load_confirmed_alerts(conn: sqlite3.Connection, *, since: str, limit: int) -> list[dict]:
     rows = conn.execute(
-        """
+        f"""
         SELECT e.id, e.event_type, e.region, e.country, e.impact_days,
                e.description, e.created_at, e.news_id,
                n.title AS news_title, n.url AS news_url, n.source AS news_source
         FROM supply_chain_events e
         LEFT JOIN supply_chain_news n ON n.id = e.news_id
-        WHERE (e.news_id IS NULL OR (n.analysis_status='succeeded' AND n.is_relevant=1 AND n.estimated_delay IS NOT NULL))
+        WHERE {valid_event_sql('e.')}
           AND substr(COALESCE(e.created_at, ''), 1, 10) >= ?
         ORDER BY COALESCE(e.created_at, '') DESC, e.id DESC
         LIMIT ?
