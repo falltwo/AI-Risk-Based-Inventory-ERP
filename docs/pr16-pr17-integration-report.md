@@ -1,9 +1,9 @@
 # PR #16 + PR #17 整合交付報告
 
-日期：2026-09-14  
-整合分支：`codex/integrate-pr16-pr17`  
-本機程式提交：`2932e1a0f524967ba91c346ce5fea0848f231ad1`、`253c01d322d5b9a58c87f65bef37011329b9f7f3`  
-PR #16 基準：`7538a410b7d14e6f88e6f9ac98d789109e014576`  
+日期：2026-09-14
+整合分支：`codex/integrate-pr16-pr17`
+本機程式提交：`2932e1a0f524967ba91c346ce5fea0848f231ad1`、`253c01d322d5b9a58c87f65bef37011329b9f7f3`
+PR #16 基準：`7538a410b7d14e6f88e6f9ac98d789109e014576`
 PR #17 基準：`0bc642f9468a50567eb4f765534236cee155e8af`
 
 ## 做了什麼
@@ -98,7 +98,7 @@ PR #17 基準：`0bc642f9468a50567eb4f765534236cee155e8af`
 C:\新EPR系統\ERP-pr16-pr17-isolated
 ```
 
-分支：`codex/integrate-pr16-pr17`  
+分支：`codex/integrate-pr16-pr17`
 測試資料庫（已被 `.gitignore` 排除）：
 
 ```text
