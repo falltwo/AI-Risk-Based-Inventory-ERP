@@ -262,6 +262,23 @@ def test_what_if_can_return_a_validated_ai_decision_draft(supply_db, monkeypatch
     assert draft["evidence_snapshot"]["affected_entity"] == "PO-101 / SUP-021"
 
 
+def test_what_if_erp_evidence_matches_location_without_llm(supply_db):
+    evidence = risk.get_what_if_erp_evidence("Taiwan 地震造成停工", actor="planner")
+
+    assert evidence["match_status"] == "location_matched"
+    assert evidence["purchase_orders"][0]["po_id"] == "PO-AUTH"
+    material = evidence["purchase_orders"][0]["materials"][0]
+    assert material["product_id"] == "P-AUTH"
+    assert material["days_left"] == 25
+
+
+def test_what_if_erp_evidence_marks_unmatched_scenario_for_review(supply_db):
+    evidence = risk.get_what_if_erp_evidence("紅海航線中斷兩週", actor="planner")
+
+    assert evidence["match_status"] == "needs_human_confirmation"
+    assert evidence["purchase_orders"][0]["po_id"] == "PO-AUTH"
+
+
 def test_entitlement_revocation_is_immediate(supply_db, monkeypatch):
     llm_calls = []
 

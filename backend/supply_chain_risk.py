@@ -743,6 +743,67 @@ def get_impacted_pos(region_key=None, country=None, supplier_id=None):
     return out
 
 
+def get_what_if_erp_evidence(user_question: str, *, actor=None) -> dict:
+    """Return the ERP rows shown beside a What-if answer.
+
+    This intentionally does not ask an LLM to identify a purchase order.  A
+    location named in the question narrows the rows deterministically; when
+    there is no ERP location match, the UI explicitly labels the open orders as
+    items that still need human confirmation.
+    """
+    require_capability(actor, RISK_WHAT_IF_RUN)
+    question = str(user_question or "").casefold()
+    with sqlite3.connect(DB_FILE) as conn:
+        rows = conn.execute(
+            """SELECT p.po_id, s.name, s.country, s.region, p.estimated_delay_days,
+                      p.alternative_suggestion
+               FROM purchase_orders p JOIN suppliers s ON s.supplier_id = p.supplier_id
+               WHERE p.status IS NULL OR p.status NOT IN ('已完成', '已取消')
+               ORDER BY p.po_id"""
+        ).fetchall()
+        item_rows = conn.execute(
+            """SELECT poi.po_id, i.product_id, i.name, i.stock, i.daily_sales
+               FROM purchase_order_items poi JOIN inventory i ON i.product_id = poi.product_id"""
+        ).fetchall()
+
+    materials_by_po: dict[str, list[dict]] = {}
+    for po_id, product_id, name, stock, daily_sales in item_rows:
+        stock = float(stock or 0)
+        daily_sales = float(daily_sales or 0)
+        days_left = int(stock / daily_sales) if daily_sales > 0 else None
+        materials_by_po.setdefault(po_id, []).append({
+            "product_id": product_id, "product_name": name,
+            "stock": stock, "daily_sales": daily_sales, "days_left": days_left,
+        })
+
+    matched_locations: list[str] = []
+    for _, _, country, region, _, _ in rows:
+        for value in (country, region):
+            normalized = str(value or "").strip().casefold()
+            if len(normalized) >= 2 and normalized in question and normalized not in matched_locations:
+                matched_locations.append(normalized)
+
+    evidence = []
+    for po_id, supplier_name, country, region, delay, alternative in rows:
+        location_values = {str(country or "").strip().casefold(), str(region or "").strip().casefold()}
+        if matched_locations and not location_values.intersection(matched_locations):
+            continue
+        material_rows = materials_by_po.get(po_id, [])
+        evidence.append({
+            "po_id": po_id,
+            "supplier_name": supplier_name,
+            "supplier_location": " ".join(part for part in (str(country or "").strip(), str(region or "").strip()) if part),
+            "materials": material_rows,
+            "estimated_delay_days": delay if delay is not None else None,
+            "alternative_suggestion": str(alternative or "").strip() or None,
+        })
+    return {
+        "matched_locations": matched_locations,
+        "match_status": "location_matched" if matched_locations else "needs_human_confirmation",
+        "purchase_orders": evidence,
+    }
+
+
 def update_po_impact(
     po_id, estimated_delay_days=None, alternative_suggestion=None, *, actor=None
 ):

@@ -12,6 +12,7 @@ from backend.supply_chain_risk import (
     get_impacted_pos,
     update_po_impact,
     get_ai_alternative_suggestions,
+    get_what_if_erp_evidence,
     what_if_decision_analysis,
 )
 
@@ -404,11 +405,20 @@ def render_supply_chain_map(
                         break
                 
                 if risk_val is not None:
+                    matched_event = next((
+                        sev for sev in s_events
+                        if ((sev.get('region') or '').strip() and (sev.get('region') or '').strip() in node_name)
+                        or ((sev.get('country') or '').strip() and (sev.get('country') or '').strip() in node_name)
+                    ), None)
+                    reason = (matched_event or {}).get("description") or "AI 摘要建議變更此供應據點的風險。"
                     table_rows.append({
-                        "套用": True, 
-                        "地區": node_name, 
-                        "預估風險 (%)": float(risk_val),
-                        "預估延遲 (天)": int(suggested_days)
+                        "套用": True,
+                        "地區": node_name,
+                        "目前風險 (%)": float(row.get("risk_pct") or 0),
+                        "AI 建議風險 (%)": float(risk_val),
+                        "風險變動 (%)": float(risk_val) - float(row.get("risk_pct") or 0),
+                        "預估延遲 (天)": int(suggested_days),
+                        "變動依據": reason,
                     })
             
             if table_rows:
@@ -418,8 +428,11 @@ def render_supply_chain_map(
                     column_config={
                         "套用": st.column_config.CheckboxColumn("是否套用", default=True),
                         "地區": st.column_config.TextColumn("熱點名稱", disabled=True),
-                        "預估風險 (%)": st.column_config.NumberColumn("影響 %", min_value=0, max_value=100, step=1),
-                        "預估延遲 (天)": st.column_config.NumberColumn("延遲天數", min_value=0, max_value=365, step=1)
+                        "目前風險 (%)": st.column_config.NumberColumn("目前風險", disabled=True),
+                        "AI 建議風險 (%)": st.column_config.NumberColumn("AI 建議風險", min_value=0, max_value=100, step=1),
+                        "風險變動 (%)": st.column_config.NumberColumn("變動", disabled=True),
+                        "預估延遲 (天)": st.column_config.NumberColumn("延遲天數", min_value=0, max_value=365, step=1),
+                        "變動依據": st.column_config.TextColumn("AI 依據", disabled=True),
                     },
                     hide_index=True,
                     use_container_width=True,
@@ -429,7 +442,7 @@ def render_supply_chain_map(
                 sel_risks = edited_risk_df[edited_risk_df["套用"] == True]
                 if st.button(f"📥 套用打勾的 {len(sel_risks)} 個地區風險至地圖", key="apply_ai_risk_btn", type="primary", disabled=len(sel_risks)==0):
                     from backend.supply_chain_risk import apply_heatmap_updates
-                    final_updates = [{"display_name": r["地區"], "risk_pct": r["預估風險 (%)"]} for _, r in sel_risks.iterrows()]
+                    final_updates = [{"display_name": r["地區"], "risk_pct": r["AI 建議風險 (%)"]} for _, r in sel_risks.iterrows()]
                     
                     # 🧪 關鍵同步：將使用者手動修改的天數寫回 suggested_events
                     current_suggested = st.session_state.get("suggested_events", [])
@@ -543,6 +556,8 @@ def render_what_if_analysis(
                     draft = what_if_decision_analysis(
                         api_key, user_question, model=gemini_model, actor=actor
                     )
+                    erp_evidence = get_what_if_erp_evidence(user_question, actor=actor)
+                draft["evidence_snapshot"]["erp_impact_evidence"] = erp_evidence
                 st.markdown("**AI 判斷與依據**")
                 clean_answer = draft["ai_output"]["reasoning"]
                 st.info(clean_answer)
@@ -558,6 +573,32 @@ def render_what_if_analysis(
 
         draft = st.session_state.get("whatif_decision_draft")
         if draft:
+            erp_evidence = draft["evidence_snapshot"].get("erp_impact_evidence", {})
+            orders = erp_evidence.get("purchase_orders", [])
+            st.markdown("#### 可查核的 ERP 影響資料")
+            if erp_evidence.get("match_status") == "needs_human_confirmation":
+                st.warning("此情境沒有直接對應到 ERP 的供應商地區。下方列出所有未結採購單供人工覆核，系統不會宣稱它們已受影響。")
+            else:
+                locations = "、".join(erp_evidence.get("matched_locations", []))
+                st.caption(f"依問題中的地區「{locations}」篩選未結採購單。")
+            if orders:
+                evidence_rows = []
+                for order in orders:
+                    materials = order.get("materials", [])
+                    material_text = "、".join(
+                        f"{item['product_name']}（庫存約剩 {item['days_left']} 天）"
+                        if item.get("days_left") is not None else item["product_name"]
+                        for item in materials
+                    ) or "尚無品項資料"
+                    evidence_rows.append({
+                        "採購單": order["po_id"], "供應商": order["supplier_name"],
+                        "據點": order["supplier_location"] or "未填寫", "相關品項／庫存": material_text,
+                        "既有延遲": f"{order['estimated_delay_days']} 天" if order.get("estimated_delay_days") is not None else "未設定",
+                        "既有替代建議": order.get("alternative_suggestion") or "未設定",
+                    })
+                st.dataframe(pd.DataFrame(evidence_rows), hide_index=True, use_container_width=True)
+            else:
+                st.info("目前沒有符合條件的未結採購單。")
             st.success("已準備好可驗證的決策草稿；請先覆核風險分數與受影響項目，再送出供人員決定。")
             if st.button("🧾 將此分析帶入『決策證據與回饋』", key="whatif_to_decision"):
                 st.session_state["decision_prefill_pending"] = draft
