@@ -6,6 +6,8 @@ Agent 動作日誌與審批日誌讀寫模組
 import hmac
 import json
 from datetime import datetime
+import sqlite3
+from backend import database as _database
 from backend.database import run_query, transaction, tx_run
 from backend.log_checksum import _get_prev_checksum, compute_checksum
 
@@ -413,3 +415,31 @@ def reject_action(approval_id: str, reason: str, approver: str) -> dict:
     from backend.tool_gateway import gateway
     res = gateway.reject_action(approval_id, reason, approver=approver)
     return res.to_dict()
+
+
+def get_reversal_record(approval_id: str, *, conn=None) -> dict | None:
+    """某審批單是否已成功沖銷過；回 {"timestamp", "result", "caller"} 或 None。
+
+    沖銷是補償交易，重按會再扣一次庫存／再取消一次訂單，所以前端要先查這裡。
+    """
+    if not approval_id:
+        return None
+    needle = json.dumps({"approval_id": approval_id}, ensure_ascii=False)[1:-1]  # "approval_id": "…"
+    query = """
+        SELECT timestamp, result, caller FROM agent_action_logs
+        WHERE tool_name = 'retry_approval' AND success = 1 AND parameters LIKE ?
+        ORDER BY id DESC LIMIT 1
+    """
+    owned = conn is None
+    conn = conn or sqlite3.connect(_database.DB_FILE)  # 動態讀，測試可改路徑
+    try:
+        receipt = conn.execute("SELECT created_at,result,actor FROM approval_reversals WHERE approval_id=?", (approval_id,)).fetchone()
+        if receipt:
+            return {"timestamp": receipt[0], "result": receipt[1], "caller": receipt[2]}
+        row = conn.execute(query, (f"%{needle}%",)).fetchone()
+    finally:
+        if owned:
+            conn.close()
+    if not row:
+        return None
+    return {"timestamp": row[0], "result": row[1], "caller": row[2]}

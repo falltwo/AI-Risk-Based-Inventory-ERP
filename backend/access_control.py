@@ -14,6 +14,8 @@ from backend import database
 
 
 RISK_OVERVIEW_READ = "risk.overview.read"
+# L1 告警的已讀／處理中／通知 L2：監控狀態，不是 ERP 資料，L1 唯讀原則不受影響
+RISK_ALERT_ACK = "risk.alert.ack"
 RISK_ANALYSIS_READ = "risk.analysis.read"
 RISK_WHAT_IF_RUN = "risk.what_if.run"
 RISK_WORKSPACE_WRITE = "risk.workspace.write"
@@ -32,6 +34,7 @@ L3_GOVERNED_ACTION = "l3_governed_action"
 
 _CAPABILITY_ENTITLEMENT = {
     RISK_OVERVIEW_READ: L1_MONITOR,
+    RISK_ALERT_ACK: L1_MONITOR,
     RISK_ANALYSIS_READ: L2_DECISION,
     RISK_WHAT_IF_RUN: L2_DECISION,
     RISK_WORKSPACE_WRITE: L2_DECISION,
@@ -49,10 +52,11 @@ _ALL_CAPABILITIES = frozenset(_CAPABILITY_ENTITLEMENT)
 
 
 _ROLE_CAPABILITIES = {
-    "risk_viewer": frozenset({RISK_OVERVIEW_READ}),
+    "risk_viewer": frozenset({RISK_OVERVIEW_READ, RISK_ALERT_ACK}),
     "supply_planner": frozenset(
         {
             RISK_OVERVIEW_READ,
+            RISK_ALERT_ACK,
             RISK_ANALYSIS_READ,
             RISK_WHAT_IF_RUN,
             RISK_WORKSPACE_WRITE,
@@ -62,6 +66,7 @@ _ROLE_CAPABILITIES = {
     "procurement_approver": frozenset(
         {
             RISK_OVERVIEW_READ,
+            RISK_ALERT_ACK,
             PROPOSAL_EVIDENCE_READ,
             APPROVAL_QUEUE_READ,
             APPROVAL_DECIDE,
@@ -74,6 +79,7 @@ _ROLE_CAPABILITIES = {
     "warehouse": frozenset(
         {
             RISK_OVERVIEW_READ,
+            RISK_ALERT_ACK,
             RISK_ANALYSIS_READ,
             RISK_WHAT_IF_RUN,
             RISK_WORKSPACE_WRITE,

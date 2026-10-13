@@ -12,6 +12,7 @@ from datetime import datetime
 from backend.access_control import load_principal
 from backend.agent_registry import AGENTS, get_tools_for_agent, get_agent_for_tool
 from backend.agent_logger import (
+    get_reversal_record,
     get_pending_list,
     get_action_logs,
     approve_action,
@@ -21,6 +22,7 @@ from backend.agent_logger import (
 )
 from backend.database import run_query
 from backend.purchase_proposals import (
+    get_purchase_proposal_context,
     ApprovalDecision,
     decide_purchase_proposal,
     get_purchase_operation_timeline,
@@ -182,8 +184,42 @@ def format_parameters_to_chinese(tool_name: str, args) -> str:
     return ", ".join(parts)
 
 
-def _render_domain_proposal_evidence(proposal) -> None:
+def _render_proposal_context(proposal, principal) -> None:
+    """L2 的事件依據與採購單註記：讓 L3 不用回 L2 頁翻就能判斷。"""
+    try:
+        context = get_purchase_proposal_context(proposal, actor=principal.username)
+    except (PermissionError, ValueError) as exc:
+        st.caption(f"（無法讀取事件依據：{exc}）")
+        return
+    event = context.get("event")
+    if event:
+        location = " ".join(part for part in (event.get("country"), event.get("region")) if part) or "未填地區"
+        st.markdown(
+            f"**風險事件依據**：#{event['id']} `{event.get('event_type') or '未分類'}`｜{location}｜"
+            f"預估延遲 {event.get('impact_days') or 0} 天｜登錄於 {event.get('created_at') or '—'}"
+        )
+        if event.get("description"):
+            st.caption(f"事件說明：{event['description'][:160]}")
+        if event.get("news_url"):
+            st.caption(f"來源新聞：[{event.get('news_title') or '開啟'}]({event['news_url']})")
+        if event.get("analysis_summary"):
+            st.markdown(f"**來源新聞 AI 摘要**（{event['analysis_status']}）：{event['analysis_summary']}")
+    else:
+        st.caption("此提案未綁定風險事件（舊提案或 L2 未選事件）。")
+    po = context.get("affected_po")
+    if po:
+        st.caption(
+            f"受影響採購單註記：{po.get('supplier_name') or po.get('po_id')}（{po.get('country') or ''} {po.get('region') or ''}）｜"
+            f"狀態 {po.get('status') or '—'}｜金額 ${float(po.get('total_amount') or 0):,.0f}｜"
+            f"L2 標記延遲 {po.get('estimated_delay_days') if po.get('estimated_delay_days') is not None else '—'} 天"
+            + (f"｜建議：{po['alternative_suggestion'][:80]}" if po.get("alternative_suggestion") else "")
+        )
+
+
+def _render_domain_proposal_evidence(proposal, principal=None) -> None:
     """Show the immutable business evidence separately from approval state."""
+    if principal is not None:
+        _render_proposal_context(proposal, principal)
     st.markdown(f"**受影響採購單**：`{proposal.affected_po_id}`")
     st.markdown(
         f"**供應來源變更**：`{proposal.original_supplier_id}` → "
@@ -267,7 +303,7 @@ def _render_purchase_approval_dashboard(principal, pending_list, approval_histor
                 st.error(f"提案證據驗證失敗，已停止決策：{evidence_error}")
                 continue
             if domain_proposal is not None:
-                _render_domain_proposal_evidence(domain_proposal)
+                _render_domain_proposal_evidence(domain_proposal, principal)
                 _render_operation_timeline(item["operation_id"], principal)
 
             if item.get("requester_username") == principal.username:
@@ -364,7 +400,7 @@ def _render_purchase_approval_dashboard(principal, pending_list, approval_histor
             if evidence_error:
                 st.error(f"提案證據驗證失敗：{evidence_error}")
             elif domain_proposal is not None:
-                _render_domain_proposal_evidence(domain_proposal)
+                _render_domain_proposal_evidence(domain_proposal, principal)
                 _render_operation_timeline(item["operation_id"], principal)
             if item["reason"]:
                 st.markdown(f"**拒絕原因**：{item['reason']}")
@@ -575,52 +611,25 @@ def render(username: str = ""):
                             history_action = _history_action_kind(
                                 item["status"], item["tool"], current_role
                             )
-                            if history_action == "rollback":
+                            reversed_record = (
+                                get_reversal_record(item["id"]) if history_action == "rollback" else None
+                            )
+                            if history_action == "rollback" and reversed_record:
+                                # 沖銷是補償交易，重按會再扣一次庫存／再取消一次訂單：已沖銷就不給按
+                                st.caption(f"🔁 已沖銷於 {reversed_record['timestamp']}")
+                            elif history_action == "rollback":
                                 # 沖銷（補償交易）：走 Gateway 執行、寫入 action log 供稽核。
                                 # 不再把單號重置回 pending —— 沖銷本身已核准人一次確認，
                                 # 不需要再進一次審批單讓同一位管理員自己審自己。
                                 if st.button("🔄 沖銷", key=f"retry_{item['id']}", use_container_width=True):
-                                    from backend.tool_gateway import gateway
-                                    ok, msg = False, ""
-                                    if item["tool"] == "update_inventory":
-                                        args = item["raw_args"]
-                                        pid = args.get("product_id")
-                                        qty_change = args.get("quantity_change")
-                                        if pid and qty_change is not None:
-                                            qty_change = float(qty_change)
-                                            res = gateway.execute_approved(
-                                                "rollback_inventory",
-                                                {"product_id": pid, "quantity_change": qty_change},
-                                                "admin",
-                                            )
-                                            ok, msg = res.is_ok(), (
-                                                f"🔄 已沖銷！產品 {pid} 庫存扣回 {qty_change} 件。" if res.is_ok()
-                                                else f"沖銷庫存失敗：{res.message}"
-                                            )
-                                    elif item["tool"] == "create_order":
-                                        args = item["raw_args"]
-                                        pid = args.get("product_id")
-                                        qty = args.get("quantity")
-                                        cust_id = args.get("customer_id", "")
-                                        if pid and qty is not None:
-                                            cancel_args = {"product_id": pid, "quantity": int(qty)}
-                                            if cust_id:
-                                                cancel_args["customer_id"] = cust_id
-                                            res = gateway.execute_approved("cancel_order", cancel_args, "admin")
-                                            ok, msg = res.is_ok(), (
-                                                f"🔄 已取消銷售訂單，並將產品 {pid} 庫存回補 {qty} 件！" if res.is_ok()
-                                                else f"沖銷訂單失敗：{res.message}"
-                                            )
-
-                                    write_action_log(
-                                        "retry_approval", {"approval_id": item["id"]}, "admin",
-                                        msg or "沖銷未執行（缺少必要參數）", ok,
-                                    )
-                                    if ok:
-                                        st.toast(msg)
+                                    from backend.approval_reversal import reverse_approval
+                                    try:
+                                        outcome = reverse_approval(item["id"], actor=principal.username)
+                                    except (ValueError, PermissionError) as exc:
+                                        st.error(str(exc))
                                     else:
-                                        st.error(msg or "沖銷未執行：缺少必要參數。")
-                                    st.rerun()
+                                        st.toast(outcome["message"])
+                                        st.rerun()
                             elif history_action == "admin_required":
                                 st.caption("🔒 僅管理員可沖銷")
                             elif history_action == "not_rollbackable":

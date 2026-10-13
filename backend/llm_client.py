@@ -19,6 +19,8 @@ import os
 
 def llm_available() -> bool:
     """是否已設定任何可用的模型供應商（.env 驅動）。"""
+    if os.getenv("ERP_ISOLATED_TEST") == "1":
+        return True
     return bool(os.getenv("LLM_MODEL") or os.getenv("OPENAI_API_KEY")
                 or os.getenv("GEMINI_API_KEY"))
 
@@ -30,6 +32,9 @@ def complete_text(prompt, system: str | None = None, temperature: float = 0.2,
     單次文字補全。prompt 可為字串或 messages list。
     回傳純文字（失敗拋例外，由呼叫端決定 fallback 行為）。
     """
+    if os.getenv("ERP_ISOLATED_TEST") == "1":
+        from .isolated_runtime import fixture_completion
+        return fixture_completion(prompt, tag)
     from backend.agent_orchestrator import _llm, _content
     from backend.prompts import PROMPT_DEFENSE_BASELINE
 

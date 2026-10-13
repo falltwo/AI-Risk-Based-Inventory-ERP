@@ -98,7 +98,7 @@ def _mutation(name: str, actor: str | None):
     factor_id = risk.get_risk_factors().iloc[0]["id"]
     operations = {
         "add_event": lambda: risk.add_risk_event(
-            "strike", "Kaohsiung", "Taiwan", 7, "new", actor=actor
+            "罷工", "Kaohsiung", "Taiwan", 7, "new", actor=actor
         ),
         "delete_event": lambda: risk.delete_risk_event(event_id, actor=actor),
         "upsert_heatmap": lambda: risk.upsert_risk_heatmap(
@@ -138,10 +138,11 @@ _WORKSPACE_MUTATIONS = (
     "delete_factor",
     "clear_factors",
     "load_presets",
+    # 採購單延遲／替代建議是給 L3 看的評估註記，不動採購單本體 → L2 workspace
+    "update_po_impact",
 )
 
 _ERP_POLICY_MUTATIONS = (
-    "update_po_impact",
     "increase_stock",
     "restore_stock",
     "update_rop",
@@ -321,7 +322,7 @@ def test_planner_news_refresh_applies_heatmap_update(supply_db, monkeypatch):
                 "summary": "Delay expected",
                 "url": "https://example.test/news",
                 "source": "test",
-                "published_at": "2026-07-20 00:00",
+                "published_at": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M"),
                 "relevance_tag": "supply_chain",
             }
         ],
@@ -331,9 +332,10 @@ def test_planner_news_refresh_applies_heatmap_update(supply_db, monkeypatch):
         "batch_infer_affected_region_from_news",
         lambda **kwargs: [
             {
+                "analysis_status": "succeeded",
                 "is_relevant": True,
                 "estimated_delay": 5,
-                "event_type": "delay",
+                "event_type": "交通",
                 "country": "Taiwan",
                 "region": "Taichung",
                 "chinese_summary": "Test summary",
@@ -342,12 +344,8 @@ def test_planner_news_refresh_applies_heatmap_update(supply_db, monkeypatch):
     )
     monkeypatch.setattr(
         risk,
-        "get_heatmap_ai_summary",
-        lambda **kwargs: (
-            "Authorized update",
-            [{"display_name": "Taiwan Taichung", "risk_pct": 88}],
-            [],
-        ),
+        "get_heatmap_ai_analysis",
+        lambda **kwargs: dict(analysis_status="succeeded", summary="Authorized update", updates=[{"display_name": "Taiwan Taichung", "risk_pct": 88}], events=[]),
     )
 
     result = news.refresh_news_for_countries(["Taiwan"], actor="planner")
@@ -367,7 +365,10 @@ def test_news_refresh_does_not_swallow_midflight_authorization_failure(
     supply_db, monkeypatch
 ):
     monkeypatch.setattr("backend.llm_client.llm_available", lambda: True)
-    monkeypatch.setattr(news, "fetch_country_news", lambda *args, **kwargs: [])
+    def revoked_during_fetch(*args, **kwargs):
+        monkeypatch.setattr(news, "require_capability", lambda *a, **k: (_ for _ in ()).throw(PermissionError("entitlement was revoked")))
+        return []
+    monkeypatch.setattr(news, "fetch_country_news", revoked_during_fetch)
     monkeypatch.setattr(
         risk,
         "get_heatmap_ai_summary",
