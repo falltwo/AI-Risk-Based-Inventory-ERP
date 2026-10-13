@@ -38,7 +38,7 @@ def reverse_approval(approval_id, *, actor):
             raise ValueError("原始審批數量無效")
         delta = -value if row[0] == "update_inventory" else value
         if row[0] == "create_order":
-            ids = set(re.findall(r"ORD-\d{8}-\d{6}", row[3]))
+            ids = set(re.findall(r"ORD-\d{8}-\d{6}(?:-\d{6}-[0-9a-f]{6})?(?![0-9A-Za-z-])", row[3]))
             if len(ids) != 1 or value <= 0:
                 raise ValueError("執行收據無法唯一識別訂單，需人工對帳")
             order_id = ids.pop()

@@ -9,6 +9,12 @@ import pandas as pd
 import plotly.express as px
 from datetime import datetime
 from backend import DB_FILE, run_query
+from backend.orders import (
+    InsufficientStockError,
+    OrderValidationError,
+    create_sales_order,
+    transition_order_status,
+)
 
 
 def render(sub_menu: str, api_key: str):
@@ -67,26 +73,24 @@ def render(sub_menu: str, api_key: str):
                 o_qty = st.number_input("數量", min_value=1)
                 o_status = st.selectbox("狀態", ["處理中", "已出貨", "已取消"])
                 if st.form_submit_button("送出") and o_id and p_id:
-                    res = run_query("SELECT stock, name, price FROM inventory WHERE product_id=?", (p_id,))
-                    if not res:
-                        st.error("找不到產品")
-                    else:
-                        stock, pname, up = res[0]
-                        total = o_qty * up
-                        if o_status != "已取消" and stock < o_qty:
-                            st.error(f"庫存不足，目前 {stock} 件")
-                        else:
-                            try:
-                                run_query(
-                                    "INSERT INTO orders (order_id, customer_id, product_id, quantity, status, order_date, total_amount) VALUES (?,?,?,?,?,?,?)",
-                                    (o_id, cust, p_id, o_qty, o_status, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), total),
-                                    fetch=False,
-                                )
-                                if o_status != "已取消":
-                                    run_query("UPDATE inventory SET stock=? WHERE product_id=?", (stock - o_qty, p_id), fetch=False)
-                                st.success(f"訂單 {o_id} 已建立，金額 {total:,.0f} 元")
-                            except sqlite3.IntegrityError:
-                                st.error("訂單編號已存在")
+                    try:
+                        result = create_sales_order(
+                            order_id=o_id,
+                            customer_id=cust,
+                            product_id=p_id,
+                            quantity=int(o_qty),
+                            status=o_status,
+                        )
+                        st.success(
+                            f"訂單 {o_id} 已建立，目前庫存 "
+                            f"{result['remaining_stock']} 件"
+                        )
+                    except InsufficientStockError as exc:
+                        st.error(str(exc))
+                    except OrderValidationError as exc:
+                        st.error(str(exc))
+                    except sqlite3.IntegrityError:
+                        st.error("訂單編號已存在")
         with st.expander("🔄 更新訂單狀態（消除沙漏 ⏳／逾期 🚨）"):
             st.caption("警示說明：⏳ 處理中（未滿 3 天）｜🚨 逾期（處理中超過 3 天）｜✅ 已出貨／已取消。將訂單改為「已出貨」或「已取消」後，警示會顯示 ✅。")
             ord_list = run_query("SELECT order_id, status FROM orders ORDER BY order_date DESC LIMIT 100")
@@ -96,8 +100,17 @@ def render(sub_menu: str, api_key: str):
                     sel_ord = st.selectbox("選擇訂單", list(ord_opts.keys()), format_func=lambda x: ord_opts.get(x, x))
                     new_status = st.selectbox("新狀態", ["已出貨", "已取消", "處理中"])
                     if st.form_submit_button("更新狀態") and sel_ord:
-                        run_query("UPDATE orders SET status=? WHERE order_id=?", (new_status, sel_ord), fetch=False)
-                        st.success(f"訂單 {sel_ord} 已更新為「{new_status}」。重新整理後警示將顯示 ✅。")
+                        try:
+                            result = transition_order_status(sel_ord, new_status)
+                            if result["changed"]:
+                                st.success(
+                                    f"訂單 {sel_ord} 已更新為「{new_status}」，"
+                                    f"目前庫存 {result['remaining_stock']} 件。"
+                                )
+                            else:
+                                st.info(f"訂單 {sel_ord} 已經是「{new_status}」。")
+                        except (InsufficientStockError, OrderValidationError) as exc:
+                            st.error(str(exc))
             else:
                 st.info("尚無訂單")
         # ── 銷售單查詢與篩選面板 (可摺疊) ──

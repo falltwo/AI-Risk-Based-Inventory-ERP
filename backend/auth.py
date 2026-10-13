@@ -1,10 +1,20 @@
-"""
-backend/auth.py
-使用者驗證與角色型存取控制 (RBAC)
+"""Authentication and the legacy role-based authorization boundary.
+
+Backend tools must not infer authorization from a Streamlit session.  The
+Gateway validates a tool/role pair first, then binds that role only for the
+duration of the tool call.  Direct calls therefore fail closed.
 """
 
-import streamlit as st
+from contextlib import contextmanager
+from contextvars import ContextVar
+from collections.abc import Iterator
+
 from .database import run_query
+
+
+_AUTHORIZED_ROLE: ContextVar[str | None] = ContextVar(
+    "erp_authorized_role", default=None
+)
 
 
 def check_login(username: str, password: str) -> dict | None:
@@ -27,20 +37,29 @@ def check_login(username: str, password: str) -> dict | None:
     return {"role": role, "name": name}
 
 
-def check_permission(allowed_roles: list) -> bool:
-    """依目前 session 角色判斷是否有權限；admin 永遠通過"""
-    try:
-        from streamlit.runtime.scriptrunner import get_script_run_ctx
-        if not get_script_run_ctx():
-            return True
-    except Exception:
-        pass
-        
-    try:
-        current_role = st.session_state.get("role", "")
-    except Exception:
-        return True
+@contextmanager
+def authorized_role(role: str) -> Iterator[None]:
+    """Bind a role that has already been authorized by the Tool Gateway.
 
+    This helper is an internal execution mechanism, not an authorization
+    decision.  Callers must validate the tool/role pair before entering it.
+    ContextVar keeps concurrent requests and async tasks isolated.
+    """
+    normalized_role = str(role or "").strip()
+    if not normalized_role:
+        raise PermissionError("A verified role is required")
+    token = _AUTHORIZED_ROLE.set(normalized_role)
+    try:
+        yield
+    finally:
+        _AUTHORIZED_ROLE.reset(token)
+
+
+def check_permission(allowed_roles: list[str] | tuple[str, ...] | set[str]) -> bool:
+    """Check the Gateway-bound role; missing identity always denies access."""
+    current_role = _AUTHORIZED_ROLE.get()
+    if not current_role:
+        return False
     if current_role == "admin":
         return True
     return current_role in allowed_roles
