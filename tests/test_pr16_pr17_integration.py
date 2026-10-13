@@ -277,3 +277,19 @@ def test_legacy_manual_unknown_or_invalid_days_are_not_confirmed_zero(integratio
         conn.execute("INSERT INTO supply_chain_events(event_type,country,region,impact_days,created_at) VALUES('其他','台灣','北區',?,datetime('now'))",(days,))
     assert l1.get_latest_event_alerts(actor="viewer")["confirmed"]==[]
     assert risk.get_active_risk_events().empty
+
+
+@pytest.mark.parametrize("order_id", ["ORD-20260914-010101", "ORD-20261013-211525-995711-f283d1"])
+def test_reversal_cancels_order_for_legacy_and_current_order_id_formats(integration_db, order_id):
+    """main's create_order now emits ORD-<date>-<time>-<usec>-<hex>; reversal must still find exactly that order."""
+    with sqlite3.connect(integration_db) as conn:
+        conn.execute("INSERT INTO inventory(product_id,name,stock,warehouse_id) VALUES('REV','fixture',20,'WH01')")
+        conn.execute("INSERT INTO pending_approvals(approval_id,tool_name,parameters,status) VALUES('REV-A','create_order',?,'approved')",
+                     (json.dumps({"product_id": "REV", "quantity": 5}),))
+        conn.execute("INSERT INTO effect_receipts(operation_id,approval_id,payload_digest,result,created_at) VALUES('REV-OP','REV-A','fixture',?,datetime('now'))",
+                     (f"✅ 成功建立新訂單 (單號: {order_id}，時間: 2026-10-13 21:15:25)",))
+        conn.execute("INSERT INTO orders(order_id,product_id,quantity,status) VALUES(?,'REV',5,'處理中')", (order_id,))
+    assert reverse_approval("REV-A", actor="admin")["status"] == "ok"
+    with sqlite3.connect(integration_db) as conn:
+        assert conn.execute("SELECT status FROM orders WHERE order_id=?", (order_id,)).fetchone()[0] == "已取消"
+        assert conn.execute("SELECT stock FROM inventory WHERE product_id='REV'").fetchone()[0] == 25
