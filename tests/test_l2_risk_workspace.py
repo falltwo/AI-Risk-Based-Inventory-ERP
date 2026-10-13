@@ -253,7 +253,7 @@ def test_scheduler_refresh_persists_summary(l2_db, monkeypatch):
     monkeypatch.setattr("backend.llm_client.llm_available", lambda: True)
     monkeypatch.setattr(news, "fetch_country_news", lambda *a, **kw: [
         {"country": "台灣", "region": "亞洲", "title": "Typhoon", "summary": "port closed",
-         "url": "https://example.test/n", "source": "t", "published_at": "2026-09-12 00:00",
+         "url": "https://example.test/n", "source": "t", "published_at": datetime.now().strftime("%Y-%m-%d 00:00"),
          "relevance_tag": "supply_chain"},
     ])
     monkeypatch.setattr(risk, "batch_infer_affected_region_from_news", lambda **kw: [
