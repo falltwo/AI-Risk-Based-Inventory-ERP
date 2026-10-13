@@ -1,0 +1,80 @@
+{
+  "case_id": "CASE-SYN-001",
+  "title": "合成港口中斷決策案例",
+  "created_by": "planner",
+  "events": [
+    {
+      "event_id": "EV-SYN-001",
+      "event_type": "port_disruption",
+      "region": "東亞",
+      "country": "台灣",
+      "description": "高雄港壅塞，貨櫃堆場延誤",
+      "occurred_at": "2026-09-01T08:00:00+08:00",
+      "recorded_by": "planner"
+    }
+  ],
+  "mappings": [
+    {
+      "mapping_id": "MAP-SYN-001",
+      "subject_type": "supplier",
+      "subject_key": "SUP-SYN-01",
+      "status": "confirmed",
+      "rationale": "官方公告證實影響"
+    },
+    {
+      "mapping_id": "MAP-SYN-002",
+      "subject_type": "supplier",
+      "subject_key": "SUP-SYN-02",
+      "status": "candidate",
+      "rationale": "供應商自述，待佐證"
+    },
+    {
+      "mapping_id": "MAP-SYN-003",
+      "subject_type": "supplier",
+      "subject_key": "SUP-SYN-03",
+      "status": "unknown",
+      "rationale": "尚無任何資訊"
+    },
+    {
+      "mapping_id": "MAP-SYN-004",
+      "subject_type": "product",
+      "subject_key": "P-SYN-01",
+      "status": "unmapped",
+      "rationale": "無對應曝險"
+    }
+  ],
+  "versions": [
+    {
+      "kind": "raw_evidence",
+      "content": {"headline": "高雄港壅塞", "source": "合成快訊", "delay_days": 7}
+    },
+    {
+      "kind": "raw_evidence",
+      "content": {"headline": "高雄港壅塞加劇", "source": "合成快訊", "delay_days": 12}
+    },
+    {
+      "kind": "manual_correction",
+      "content": {"note": "人工核實：碼頭營運商未停工"}
+    },
+    {
+      "kind": "scenario_input",
+      "content": {"horizon_days": 14, "impact": "supplier_delay"}
+    },
+    {
+      "kind": "scenario_input",
+      "content": {"horizon_days": 30, "impact": "supplier_delay_extended"}
+    }
+  ],
+  "runs": [
+    {
+      "run_id": "RUN-SYN-001",
+      "input_version": 1,
+      "result": {"affected_suppliers": 1, "score": 42.0}
+    },
+    {
+      "run_id": "RUN-SYN-002",
+      "input_version": 2,
+      "result": {"affected_suppliers": 3, "score": 71.0}
+    }
+  ]
+}
