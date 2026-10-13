@@ -4,10 +4,11 @@ backend/supply_chain_risk.py
 職責：供應鏈地圖資料、風險事件與交期、風險係數管理、風險報告產出
 """
 
+import json
 import sqlite3
 import re
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Any
 from backend.database import DB_FILE, run_query
 from backend.access_control import (
@@ -21,6 +22,7 @@ from backend.prompts import (
     BATCH_INFER_WITH_PRECEDENTS_PROMPT,
     PO_ALTERNATIVE_SUGGESTION_PROMPT,
     WHAT_IF_SYSTEM_PROMPT,
+    WHAT_IF_DECISION_JSON_INSTRUCTIONS,
     WHAT_IF_USER_PROMPT
 )
 
@@ -838,6 +840,67 @@ def get_impacted_pos(region_key=None, country=None, supplier_id=None):
     return out
 
 
+def get_what_if_erp_evidence(user_question: str, *, actor=None) -> dict:
+    """Return the ERP rows shown beside a What-if answer.
+
+    This intentionally does not ask an LLM to identify a purchase order.  A
+    location named in the question narrows the rows deterministically; when
+    there is no ERP location match, the UI explicitly labels the open orders as
+    items that still need human confirmation.
+    """
+    require_capability(actor, RISK_WHAT_IF_RUN)
+    question = str(user_question or "").casefold()
+    with sqlite3.connect(DB_FILE) as conn:
+        rows = conn.execute(
+            """SELECT p.po_id, s.name, s.country, s.region, p.estimated_delay_days,
+                      p.alternative_suggestion
+               FROM purchase_orders p JOIN suppliers s ON s.supplier_id = p.supplier_id
+               WHERE p.status IS NULL OR p.status NOT IN ('已完成', '已取消')
+               ORDER BY p.po_id"""
+        ).fetchall()
+        item_rows = conn.execute(
+            """SELECT poi.po_id, i.product_id, i.name, i.stock, i.daily_sales
+               FROM purchase_order_items poi JOIN inventory i ON i.product_id = poi.product_id"""
+        ).fetchall()
+
+    materials_by_po: dict[str, list[dict]] = {}
+    for po_id, product_id, name, stock, daily_sales in item_rows:
+        stock = float(stock or 0)
+        daily_sales = float(daily_sales or 0)
+        days_left = int(stock / daily_sales) if daily_sales > 0 else None
+        materials_by_po.setdefault(po_id, []).append({
+            "product_id": product_id, "product_name": name,
+            "stock": stock, "daily_sales": daily_sales, "days_left": days_left,
+        })
+
+    matched_locations: list[str] = []
+    for _, _, country, region, _, _ in rows:
+        for value in (country, region):
+            normalized = str(value or "").strip().casefold()
+            if len(normalized) >= 2 and normalized in question and normalized not in matched_locations:
+                matched_locations.append(normalized)
+
+    evidence = []
+    for po_id, supplier_name, country, region, delay, alternative in rows:
+        location_values = {str(country or "").strip().casefold(), str(region or "").strip().casefold()}
+        if matched_locations and not location_values.intersection(matched_locations):
+            continue
+        material_rows = materials_by_po.get(po_id, [])
+        evidence.append({
+            "po_id": po_id,
+            "supplier_name": supplier_name,
+            "supplier_location": " ".join(part for part in (str(country or "").strip(), str(region or "").strip()) if part),
+            "materials": material_rows,
+            "estimated_delay_days": delay if delay is not None else None,
+            "alternative_suggestion": str(alternative or "").strip() or None,
+        })
+    return {
+        "matched_locations": matched_locations,
+        "match_status": "location_matched" if matched_locations else "needs_human_confirmation",
+        "purchase_orders": evidence,
+    }
+
+
 def update_po_impact(po_id, estimated_delay_days=None, alternative_suggestion=None, *, actor=None):
     """Planner may change assessment notes, never the underlying transaction."""
     require_capability(actor, RISK_WORKSPACE_WRITE)
@@ -937,6 +1000,18 @@ def what_if_simulation(
 ):
     """依使用者情境問題，結合 ERP 供應商、未結案採購單、庫存安全天數，由 AI 回覆影響與建議。model 為 Gemini 模型 ID。"""
     require_capability(actor, RISK_WHAT_IF_RUN)
+    prompt = _what_if_prompt(user_question)
+    try:
+        # issue #27：統一 LLM 入口（api_key 參數棄用，.env 驅動）
+        from backend.llm_client import complete_text
+        return (complete_text(prompt, system=WHAT_IF_SYSTEM_PROMPT, temperature=0.2,
+                              tag="analysis:whatif") or "").strip()
+    except Exception as e:
+        return f"模擬分析暫時無法產生：{e}"
+
+
+def _what_if_prompt(user_question: str) -> str:
+    """Build one ERP evidence snapshot prompt for either prose or JSON What-if analysis."""
     conn = connect_db(DB_FILE)
     suppliers = __pd_read("SELECT supplier_id, name, country, region FROM suppliers", conn)
     pos = __pd_read(
@@ -953,20 +1028,60 @@ def what_if_simulation(
     supplier_text = suppliers.to_string(index=False) if suppliers is not None and not suppliers.empty else "無"
     po_text = pos.to_string(index=False) if pos is not None and not pos.empty else "無進行中採購單"
     inv_text = inv.to_string(index=False) if inv is not None and not inv.empty else "無庫存資料"
-    system = WHAT_IF_SYSTEM_PROMPT
-    prompt = WHAT_IF_USER_PROMPT.format(
+    return WHAT_IF_USER_PROMPT.format(
         supplier_text=supplier_text,
         po_text=po_text,
         inv_text=inv_text,
         user_question=user_question
     )
+
+
+def what_if_decision_analysis(api_key, user_question, model: str | None = "gemini-2.5-flash", *, actor=None):
+    """Ask the model for a validated, reviewable What-if decision draft.
+
+    This function creates no database record and never performs an ERP write.
+    The caller must show the result to a human for confirmation first.
+    """
+    require_capability(actor, RISK_WHAT_IF_RUN)
+    prompt = _what_if_prompt(user_question)
     try:
-        # issue #27：統一 LLM 入口（api_key 參數棄用，.env 驅動）
         from backend.llm_client import complete_text
-        return (complete_text(prompt, system=system, temperature=0.2,
-                              tag="analysis:whatif") or "").strip()
-    except Exception as e:
-        return f"模擬分析暫時無法產生：{e}"
+        raw = complete_text(
+            prompt,
+            system=WHAT_IF_SYSTEM_PROMPT + "\n\n" + WHAT_IF_DECISION_JSON_INSTRUCTIONS,
+            temperature=0.2,
+            json_mode=True,
+            tag="analysis:whatif-decision",
+        )
+        payload = json.loads(raw or "{}")
+        from backend.decision_evidence import validate_ai_output
+        risk_score = payload.get("risk_score")
+        if isinstance(risk_score, bool) or not isinstance(risk_score, (int, float)) or not 0 <= risk_score <= 100:
+            raise ValueError("AI 回覆的 risk_score 必須是 0 到 100 的數字。")
+        affected_entity = str(payload.get("affected_entity", "")).strip()
+        if not affected_entity:
+            raise ValueError("AI 回覆缺少 affected_entity。")
+        ai_output = validate_ai_output({
+            "recommendation": payload.get("recommendation"),
+            "risk_level": payload.get("risk_level"),
+            "reasoning": payload.get("reasoning"),
+            "limitations": payload.get("limitations"),
+            "evidence_ids": [f"what-if:{hash(str(user_question) + str(raw)) & 0xffffffff:08x}"],
+        })
+        captured_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        return {
+            "decision_type": "supply_chain_what_if_response",
+            "model_name": f"gemini/{model or 'default'}",
+            "ai_output": ai_output,
+            "evidence_snapshot": {
+                "risk_score": float(risk_score),
+                "data_as_of": captured_at,
+                "sources": [{"name": "What-if 情境分析（ERP 供應商、採購單與庫存快照）", "as_of": captured_at}],
+                "affected_entity": affected_entity,
+            },
+        }
+    except Exception as exc:
+        raise ValueError(f"模擬分析暫時無法產生結構化 AI 判斷：{exc}") from exc
 
 
 # ── 風險事件與交期 ────────────────────────────────────────────────────
