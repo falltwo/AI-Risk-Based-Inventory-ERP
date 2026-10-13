@@ -1,0 +1,20 @@
+{
+  "case_id": "CASE-SKU-001",
+  "scenario_id": "disruption",
+  "input_version": 1,
+  "seed": 0,
+  "horizon_days": 20,
+  "sku": "SKU-001",
+  "po_id": "PO-001",
+  "po_quantity": 200.0,
+  "initial_stock": 15.0,
+  "lead_time_days": 3,
+  "holding_cost": 1.0,
+  "stockout_cost": 50.0,
+  "demand": {
+    "type": "D",
+    "demand_list": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+  },
+  "assumption_source": "synthetic-fixture/stockpyl-spike-v1 (hand-computable fixed demand; not enterprise data)",
+  "description": "中斷情境：單張 PO-001（Q=200）交期中斷，延至 t=3 一次到貨，之後無任何補貨。合成假設，非企業資料。"
+}

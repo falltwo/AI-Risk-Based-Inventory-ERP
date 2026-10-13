@@ -1,0 +1,16 @@
+# requirements-scenario.txt
+# 隔離研究依賴：情境契約 + Stockpyl adapter 實驗用（acceptance 實驗重跑）。
+# 此檔獨立於主 requirements.txt，不進入 production / 正式 UI。
+#
+# 用法：在 /tmp 建隔離 venv（不要把 venv 或快取寫進 repo）：
+#   python3 -m venv /tmp/scn-stockpyl-venv
+#   /tmp/scn-stockpyl-venv/bin/pip install -r requirements-scenario.txt
+#   cd <worktree root>
+#   /tmp/scn-stockpyl-venv/bin/python -m pytest tests/test_scenario_engine.py -v
+#
+# 對應 vault `19-學術專題開源整合候選重查.md:79-82`：Stockpyl v1.0.2（MIT）。
+# 單一 PO adapter 使用 Stockpyl 公開 API：sim.initialize / sim.step(order_quantity_override) /
+# sim.close 逐期手動驅動（見 docs/research/scenario_validation.md §4 fit/gap）。
+
+stockpyl==1.0.2
+pytest>=8
