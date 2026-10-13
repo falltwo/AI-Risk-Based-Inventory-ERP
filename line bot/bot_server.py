@@ -49,10 +49,12 @@ from backend.tool_registry import registry
 from backend.flex_builder import build_low_stock_flex, build_risk_events_flex
 from backend.chart_builder import build_carbon_trend_chart, build_finance_pie_chart
 from line_access import (
+    build_line_gateway_response,
     build_line_tools,
     env_flag,
     is_line_tool_allowed,
     parse_line_user_ids,
+    resolve_line_role,
 )
 
 # 確保資料庫初始化
@@ -98,42 +100,29 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 # Flex：單一 text 元件最多約 2000 字元；整則 Flex JSON 有大小上限，保守分段
 _FLEX_CHUNK = 1400
 _FLEX_MAX_CHUNKS = 5
+_DASHBOARD_AUTH_TOOLS = {
+    "low_stock": "get_low_stock_inventory",
+    "risk_events": "get_supply_chain_risk_events",
+    "chart_carbon": "get_carbon_emissions_by_month",
+    "chart_finance": "get_financial_overview",
+}
+# 僅用於建構模型可見的工具 Schema 白名單（LINE_TOOLS）。
+# 注意：此常數「不得」作為身分解析失敗時的執行期角色回退 —— 那會是 fail-open。
 _LINE_GATEWAY_DEFAULT_ROLE = "warehouse"
 
 
-def _get_line_user_role(line_user_id: str) -> str:
-    """查詢 LINE 用戶的 ERP 角色，預設為 warehouse（受限角色）"""
-    try:
-        from backend.database import get_line_user_role
-        return get_line_user_role(line_user_id)
-    except Exception:
-        return _LINE_GATEWAY_DEFAULT_ROLE
+def _get_line_user_role(line_user_id: str) -> str | None:
+    """查詢 LINE 用戶的 ERP 角色（fail-closed）。
+
+    resolver 不可用、查詢例外、使用者不存在或角色空白時一律回傳 None；
+    呼叫端必須拒絕，絕不回退 warehouse 或任何預設角色。
+    """
+    return resolve_line_role(line_user_id)
 
 
-def _build_gateway_function_response(tool_name: str, args: dict, role: str = None) -> tuple[dict, bool]:
-    if role is None:
-        role = _LINE_GATEWAY_DEFAULT_ROLE
-    if not is_line_tool_allowed(tool_name, registry, role):
-        return (
-            {
-                "status": "denied",
-                "error": "LINE 入口僅允許唯讀或建議工具；寫入操作請由已登入的 Web 介面送審。",
-            },
-            False,
-        )
-    gw_result = gateway.call(tool_name, args or {}, role=role)
-    payload = gw_result.to_dict()
-
-    if gw_result.is_ok():
-        payload["result"] = gw_result.data
-        return payload, True
-
-    if gw_result.status == "pending":
-        payload["result"] = f"已送審批：{gw_result.message}"
-        return payload, False
-
-    payload["error"] = gw_result.message or f"Gateway returned status: {gw_result.status}"
-    return payload, False
+def _build_gateway_function_response(tool_name: str, args: dict, role: str | None = None) -> tuple[dict, bool]:
+    """LINE 執行邊界：身分解析失敗（role=None）一律拒絕，不回退 warehouse。"""
+    return build_line_gateway_response(tool_name, args, registry, gateway, role)
 
 
 def _gateway_payload_to_reply(payload: dict) -> str:
@@ -250,7 +239,7 @@ def reply_text_to_flex_message(reply_text: str, title="進銷存助理") -> Flex
     return FlexMessage(alt_text=_flex_alt_text(reply_text), contents=bubble)
 
 
-def get_ai_response(user_msg: str, audio_bytes: bytes = None, extra_system_prompt: str = "", user_id: str = None, erp_role: str = None) -> tuple[str, list[str]]:
+def get_ai_response(user_msg: str, audio_bytes: bytes = None, extra_system_prompt: str = "", user_id: str = None, erp_role: str | None = None) -> tuple[str, list[str]]:
     from datetime import datetime
     today_str = datetime.now().strftime("%Y-%m-%d")
     current_year = datetime.now().year
@@ -412,7 +401,9 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=400, detail="Invalid signature")
     return 'OK'
 
-def _send_full_reply(event, line_bot_api, user_msg_log, reply_text, dashboards):
+def _send_full_reply(
+    event, line_bot_api, user_msg_log, reply_text, dashboards, erp_role: str | None = None
+):
     user_id = event.source.user_id
     try:
         profile = line_bot_api.get_profile(user_id)
@@ -432,14 +423,18 @@ def _send_full_reply(event, line_bot_api, user_msg_log, reply_text, dashboards):
     reply_msgs = [reply_text_to_flex_message(reply_text)]
     
     # [防呆補強] 若 AI 偷懶沒呼叫工具（幻覺），只要字眼有關鍵字就強行加入視覺化圖表
-    dashboards_set = set(dashboards)
-    if ("碳排" in user_msg_log or "探排" in user_msg_log or "ESG" in user_msg_log or "esg" in user_msg_log) and "chart_carbon" not in dashboards_set:
+    def dashboard_allowed(name: str) -> bool:
+        tool_name = _DASHBOARD_AUTH_TOOLS.get(name)
+        return bool(tool_name and is_line_tool_allowed(tool_name, registry, erp_role))
+
+    dashboards_set = {name for name in dashboards if dashboard_allowed(name)}
+    if dashboard_allowed("chart_carbon") and ("碳排" in user_msg_log or "探排" in user_msg_log or "ESG" in user_msg_log or "esg" in user_msg_log) and "chart_carbon" not in dashboards_set:
         dashboards_set.add("chart_carbon")
-    if ("財務" in user_msg_log or "資產" in user_msg_log) and "chart_finance" not in dashboards_set:
+    if dashboard_allowed("chart_finance") and ("財務" in user_msg_log or "資產" in user_msg_log) and "chart_finance" not in dashboards_set:
         dashboards_set.add("chart_finance")
-    if ("庫存" in user_msg_log or "補貨" in user_msg_log) and "low_stock" not in dashboards_set:
+    if dashboard_allowed("low_stock") and ("庫存" in user_msg_log or "補貨" in user_msg_log) and "low_stock" not in dashboards_set:
         dashboards_set.add("low_stock")
-    if (
+    if dashboard_allowed("risk_events") and (
         "供應鏈" in user_msg_log
         or "風險" in user_msg_log
         or "熱點" in user_msg_log
@@ -526,7 +521,7 @@ def handle_text_message(event):
             reply_text = f"❌ 抱歉，系統運作發生錯誤：{e}"
             dashboards = []
             
-        _send_full_reply(event, line_bot_api, user_msg, reply_text, dashboards)
+        _send_full_reply(event, line_bot_api, user_msg, reply_text, dashboards, erp_role)
 
 
 @handler.add(MessageEvent, message=AudioMessageContent)
@@ -543,7 +538,7 @@ def handle_audio_message(event):
             reply_text = f"❌ 抱歉，語音處理發生錯誤：{e}"
             dashboards = []
             
-        _send_full_reply(event, line_bot_api, "[語音訊息交辦]", reply_text, dashboards)
+        _send_full_reply(event, line_bot_api, "[語音訊息交辦]", reply_text, dashboards, erp_role)
 
 
 @handler.add(PostbackEvent)
@@ -560,7 +555,7 @@ def handle_postback(event):
             reply_text = f"❌ 抱歉，快捷觸發發生錯誤：{e}"
             dashboards = []
             
-        _send_full_reply(event, line_bot_api, f"[按鈕觸發] {data}", reply_text, dashboards)
+        _send_full_reply(event, line_bot_api, f"[按鈕觸發] {data}", reply_text, dashboards, erp_role)
 
 
 async def execute_morning_briefing():
