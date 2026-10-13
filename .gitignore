@@ -232,3 +232,8 @@ line bot/ngrok.exe
 # Local AI-assistant and planning state must never enter the public repository.
 .claude/
 .planning/
+
+# Isolated batch-one runtime state
+.isolated/
+*.db.news.lock
+*.db.scheduler.lock

@@ -133,14 +133,12 @@ def update_inventory(product_id: str, quantity_change: int) -> str:
     return f"找不到產品編號 {product_id}。"
 
 
-def rollback_inventory(product_id: str, quantity_change: int) -> str:
-    """
-    沖銷先前的庫存異動（補償交易）。
-    將 update_inventory 的異動量反向執行，需 admin 權限。
-    """
-    if not check_permission(["admin"]):
-        return "權限不足：只有『管理員』可以執行庫存沖銷。"
-    return update_inventory(product_id=product_id, quantity_change=-quantity_change)
+def rollback_inventory(product_id: str, quantity_change: int, *, approval_id=None, actor=None):
+    """Compensation must resolve its original parameters from a durable approval."""
+    if not approval_id:
+        raise ValueError("沖銷需要原始 approval_id 與管理員身份")
+    from .approval_reversal import reverse_approval
+    return reverse_approval(approval_id, actor=actor)["message"]
 
 
 def get_inventory_total_value(use_cost: bool = True) -> str:

@@ -31,6 +31,8 @@ def render(
         return
 
     st.markdown("<div class='premium-title'>🌱 供應鏈與風險監控</div>", unsafe_allow_html=True)
+    from frontend.components.news_acceptance import render_news_acceptance
+    render_news_acceptance()
 
     tabs = ["📊 L1 風險總覽"]
     if principal.can(DECISION_EVIDENCE_READ):
@@ -40,7 +42,7 @@ def render(
     rendered_tabs = st.tabs(tabs)
 
     with rendered_tabs[0]:
-        render_risk_overview()
+        render_risk_overview(actor=principal.username)
 
     evidence_index = 1 if principal.can(DECISION_EVIDENCE_READ) else None
     if evidence_index is not None:

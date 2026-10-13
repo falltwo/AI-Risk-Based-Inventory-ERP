@@ -611,8 +611,12 @@ class ToolGateway:
 
     def _execute(self, tool_name: str, args: dict, role: str) -> GatewayResult:
         """實際執行工具函式"""
+        if tool_name in {"rollback_inventory", "cancel_order"}:
+            return GatewayResult(status="denied", message="沖銷須使用 reverse_approval，綁定原始審批及執行收據。")
         try:
             import inspect
+            from backend.auth import authorized_role
+
             func   = tools_mapping[tool_name]
             sig = inspect.signature(func)
             has_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
@@ -620,7 +624,11 @@ class ToolGateway:
                 filtered_args = args or {}
             else:
                 filtered_args = {k: v for k, v in (args or {}).items() if k in sig.parameters}
-            result = func(**filtered_args)
+            # ``call`` has already checked the registry's role allowlist.
+            # Bind that decision only around the backend function invocation;
+            # direct function calls have no context and fail closed.
+            with authorized_role(role):
+                result = func(**filtered_args)
             _write_log(tool_name, args, role, result, success=True)
             return GatewayResult(status="ok", data=result)
         except Exception as e:
